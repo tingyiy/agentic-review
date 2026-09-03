@@ -59,6 +59,12 @@ on:
         description: Atlassian site for ticket context; empty disables it.
         type: string
         default: ""
+      ticket_pattern:
+        description: >-
+          Regex a PR title must match (REVIEW_TICKET_PATTERN). Empty disables
+          the title check — right for a repository with no tracker.
+        type: string
+        default: '[A-Z][A-Z0-9]+-\d+'
     secrets:
       # Only for GitHub-hosted runs. Absent on a fork's pull request by
       # GitHub's design, and absent by choice on a self-hosted runner that
@@ -168,6 +174,7 @@ jobs:
         env:
           REVIEW_ENV_FILES: ${{ inputs.env_files }}
           REVIEW_JIRA_SITE: ${{ inputs.jira_site }}
+          REVIEW_TICKET_PATTERN: ${{ inputs.ticket_pattern }}
           REVIEW_BOT_LOGIN: ${{ inputs.bot_login }}
           IN_FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
           IN_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

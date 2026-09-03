@@ -82,6 +82,13 @@ class TestHostedRuns:
         assert "not reviewing" in steps["Review"]["run"]
         assert "exit 0" in steps["Review"]["run"]
 
+    def test_this_repository_has_no_tracker_so_no_title_check(self):
+        caller = yaml.safe_load(SELF_CALLER.read_text())
+        assert caller["jobs"]["review"]["with"]["ticket_pattern"] == ""
+        wf = yaml.safe_load(REUSABLE.read_text())
+        review = next(s for s in wf["jobs"]["review"]["steps"] if s.get("name") == "Review")
+        assert review["env"]["REVIEW_TICKET_PATTERN"] == "${{ inputs.ticket_pattern }}"
+
     def test_this_repository_reviews_itself_hosted(self):
         caller = yaml.safe_load(SELF_CALLER.read_text())
         job = caller["jobs"]["review"]

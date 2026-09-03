@@ -19,6 +19,7 @@ jobs:
       bot_login: github-actions[bot]
       post_as_actions_bot: true
       runner: '["ubuntu-latest"]'
+      ticket_pattern: ""     # no tracker here
     secrets:
       FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
