@@ -1,20 +1,31 @@
 # Reusable AI code review. Call it from any repository with the caller in
 # `examples/pr-review-caller.yml`.
 #
-# NO SECRETS IN THE CALLER. The job runs on a self-hosted runner that already
-# holds the model key and the bot token — in its environment, or in the files
-# named by `env_files`. A reviewed repository contributes nothing but its code.
+# TWO WAYS TO RUN IT.
 #
-# A self-hosted job executes whatever a PR's workflow says, on that box. Keep
-# the runner group closed to public repositories and never attach a caller to
-# a repository that accepts pull requests from strangers.
+#   * Self-hosted (the default): the job lands on a runner you own that already
+#     holds the model key and the bot token — in its environment, or in the
+#     files named by `env_files`. A reviewed repository contributes nothing but
+#     its code. A self-hosted job executes whatever a PR's workflow says, on
+#     that box: keep the runner group closed to public repositories and never
+#     attach a caller to a repository that accepts pull requests from strangers.
+#
+#   * GitHub-hosted (`runner: '["ubuntu-latest"]'`): the keys come in as
+#     repository SECRETS, which GitHub masks in logs and WITHHOLDS from
+#     workflows started by a fork's pull request — so a stranger's PR runs
+#     without them and the review step skips with a log line. With
+#     `post_as_actions_bot: true` the review is posted by the workflow's own
+#     token as `github-actions[bot]`, and no personal access token exists at
+#     all. This is the right shape for a public repository.
 name: AI PR review
 
 on:
   workflow_call:
     inputs:
       bot_login:
-        description: The GitHub login the reviewer posts as. A re-request for this login re-reviews.
+        description: >-
+          The GitHub login the reviewer posts as. A re-request for this login
+          re-reviews. With `post_as_actions_bot` this is `github-actions[bot]`.
         type: string
         required: true
       reviewer_repo:
@@ -29,9 +40,17 @@ on:
         type: string
         default: main
       runner:
-        description: JSON list of labels for the self-hosted runner that holds the credentials.
+        description: >-
+          JSON list of labels for the runner that does the work. Self-hosted
+          holds the credentials itself; GitHub-hosted takes them from secrets.
         type: string
         default: '["self-hosted"]'
+      post_as_actions_bot:
+        description: >-
+          Post with the workflow's own GITHUB_TOKEN, as `github-actions[bot]`.
+          For GitHub-hosted runs; the caller must grant pull-requests: write.
+        type: boolean
+        default: false
       env_files:
         description: Colon-separated files the reviewer reads KEY=VALUE from (REVIEW_ENV_FILES).
         type: string
@@ -40,8 +59,24 @@ on:
         description: Atlassian site for ticket context; empty disables it.
         type: string
         default: ""
+    secrets:
+      # Only for GitHub-hosted runs. Absent on a fork's pull request by
+      # GitHub's design, and absent by choice on a self-hosted runner that
+      # holds its own.
+      FIREWORKS_API_KEY:
+        required: false
+      OPENROUTER_API_KEY:
+        required: false
+      REVIEW_GITHUB_TOKEN:
+        description: A bot's token, when the review should not post as github-actions[bot].
+        required: false
 
-permissions: {}
+# Granted by the caller; a reusable workflow cannot exceed what it is given.
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+  actions: read
 
 # One review per PR at a time; a newer trigger supersedes an older one. A
 # comment run gets its own group so it can never cancel a review.
@@ -61,9 +96,12 @@ concurrency:
 
 jobs:
   review:
-    # The gate chooses the RUNNER rather than skipping the job: a skipped job
-    # prints its raw expression as the check title. When there is nothing to
-    # do, the job lands on GitHub-hosted and every step no-ops.
+    # The gate is evaluated ONCE, in the first step, and every later step
+    # reads its output. It used to be "are we on a self-hosted runner", which
+    # cannot tell the arms apart when both land on GitHub-hosted. The job is
+    # never skipped: a skipped job prints its raw name expression as the check
+    # title. The name and the runner repeat the gate because expressions
+    # cannot be shared; `tests/test_workflow_template.py` pins the copies equal.
     name: >-
       review (${{ (github.event.pull_request
       && github.event.pull_request.draft == false
@@ -94,8 +132,21 @@ jobs:
       && inputs.runner || '["ubuntu-latest"]') }}
     timeout-minutes: 25
     steps:
+      - name: Gate
+        id: gate
+        run: |
+          echo "work=${{ ((github.event.pull_request
+            && github.event.pull_request.draft == false
+            && ((github.event.action != 'review_requested'
+            && (github.event.action != 'edited'
+            || github.event.changes.title
+            || github.event.changes.body)
+            && !startsWith(github.event.pull_request.head.ref, 'noreview/'))
+            || github.event.requested_reviewer.login == inputs.bot_login))
+            || (github.event.issue.pull_request
+            && github.event.comment.user.login == github.event.issue.user.login)) }}" >> "$GITHUB_OUTPUT"
       - name: Fetch the reviewer
-        if: runner.environment == 'self-hosted'
+        if: steps.gate.outputs.work == 'true'
         env:
           REVIEWER_REPO: ${{ inputs.reviewer_repo }}
           REVIEWER_REF: ${{ inputs.reviewer_ref }}
@@ -110,13 +161,28 @@ jobs:
           test -f agentic_review/__main__.py
           test -f agentic_review/objection.py
           echo "reviewer at $(git rev-parse --short FETCH_HEAD)"
+      # Secrets are exported only when present, so a self-hosted runner's own
+      # environment and env files are never shadowed by an empty value.
       - name: Review
-        if: runner.environment == 'self-hosted' && !github.event.comment
+        if: steps.gate.outputs.work == 'true' && !github.event.comment
         env:
           REVIEW_ENV_FILES: ${{ inputs.env_files }}
           REVIEW_JIRA_SITE: ${{ inputs.jira_site }}
+          REVIEW_BOT_LOGIN: ${{ inputs.bot_login }}
+          IN_FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          IN_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          IN_REVIEW_GITHUB_TOKEN: ${{ secrets.REVIEW_GITHUB_TOKEN }}
+          IN_ACTIONS_TOKEN: ${{ inputs.post_as_actions_bot && github.token || '' }}
         run: |
           set -euo pipefail
+          [ -n "$IN_FIREWORKS_API_KEY" ] && export FIREWORKS_API_KEY="$IN_FIREWORKS_API_KEY"
+          [ -n "$IN_OPENROUTER_API_KEY" ] && export OPENROUTER_API_KEY="$IN_OPENROUTER_API_KEY"
+          [ -n "$IN_REVIEW_GITHUB_TOKEN" ] && export REVIEW_GITHUB_TOKEN="$IN_REVIEW_GITHUB_TOKEN"
+          [ -n "$IN_ACTIONS_TOKEN" ] && export REVIEW_GITHUB_TOKEN="$IN_ACTIONS_TOKEN"
+          if [ -z "${FIREWORKS_API_KEY:-}" ] && [ -z "$REVIEW_ENV_FILES" ]; then
+            echo "no model key in this run (a fork's pull request gets no secrets) — not reviewing"
+            exit 0
+          fi
           cd "$RUNNER_TEMP/reviewer"
           python3 -m agentic_review \
             "${{ github.event.repository.name }}" \
@@ -124,16 +190,29 @@ jobs:
       # An author's comment is a question, not a review: does it object to the
       # last review? Only a yes re-requests the bot, through the ordinary path.
       - name: Objection check
-        if: runner.environment == 'self-hosted' && github.event.comment
+        if: steps.gate.outputs.work == 'true' && github.event.comment
         env:
           REVIEW_ENV_FILES: ${{ inputs.env_files }}
+          REVIEW_BOT_LOGIN: ${{ inputs.bot_login }}
+          IN_FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          IN_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          IN_REVIEW_GITHUB_TOKEN: ${{ secrets.REVIEW_GITHUB_TOKEN }}
+          IN_ACTIONS_TOKEN: ${{ inputs.post_as_actions_bot && github.token || '' }}
         run: |
           set -euo pipefail
+          [ -n "$IN_FIREWORKS_API_KEY" ] && export FIREWORKS_API_KEY="$IN_FIREWORKS_API_KEY"
+          [ -n "$IN_OPENROUTER_API_KEY" ] && export OPENROUTER_API_KEY="$IN_OPENROUTER_API_KEY"
+          [ -n "$IN_REVIEW_GITHUB_TOKEN" ] && export REVIEW_GITHUB_TOKEN="$IN_REVIEW_GITHUB_TOKEN"
+          [ -n "$IN_ACTIONS_TOKEN" ] && export REVIEW_GITHUB_TOKEN="$IN_ACTIONS_TOKEN"
+          if [ -z "${FIREWORKS_API_KEY:-}" ] && [ -z "$REVIEW_ENV_FILES" ]; then
+            echo "no model key in this run — not checking"
+            exit 0
+          fi
           cd "$RUNNER_TEMP/reviewer"
           python3 -m agentic_review.objection \
             "${{ github.event.repository.name }}" \
             "${{ github.event.issue.number }}" \
             "${{ github.event.comment.id }}"
       - name: Clean up
-        if: always() && runner.environment == 'self-hosted'
+        if: always() && steps.gate.outputs.work == 'true'
         run: rm -rf "$RUNNER_TEMP/reviewer"

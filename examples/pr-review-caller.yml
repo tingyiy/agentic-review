@@ -10,11 +10,24 @@ on:
   # disputes the review re-requests one.
   issue_comment:
     types: [created]
+# Grant what the reusable workflow needs; it cannot exceed this.
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+  actions: read
 jobs:
   review:
     uses: tingyiy/agentic-review/.github/workflows/pr-review.yml@main
     with:
       bot_login: your-review-bot
       reviewer_ref: <pin a commit of tingyiy/agentic-review>
+      # SELF-HOSTED: the runner holds the keys and the bot token itself.
       runner: '["self-hosted", "your-label"]'
       env_files: "~/.config/agentic-review/.env"
+    # GITHUB-HOSTED instead: drop `env_files`, set `runner: '["ubuntu-latest"]'`
+    # and `post_as_actions_bot: true` (or pass REVIEW_GITHUB_TOKEN for a bot
+    # account), and hand the keys in as repository secrets:
+    # secrets:
+    #   FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+    #   OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

@@ -1764,7 +1764,15 @@ DISMISS_MESSAGE = (
 
 @lru_cache(maxsize=1)
 def _me():
-    """The login this token posts as. Cached — it cannot change mid-run."""
+    """The login this token posts as.
+
+    `REVIEW_BOT_LOGIN` wins when set: the workflow's own GITHUB_TOKEN cannot
+    call `/user` at all, and a self-hosted bot's login is known to the caller
+    anyway — asking GitHub is the fallback, not the source of truth.
+    """
+    known = os.environ.get("REVIEW_BOT_LOGIN", "").strip()
+    if known:
+        return known
     try:
         return json.loads(gh("/user")).get("login") or ""
     except Exception as e:  # noqa: BLE001 — identity is best-effort
