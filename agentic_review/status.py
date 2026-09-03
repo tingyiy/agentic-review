@@ -5,7 +5,7 @@ request lands a second later and starts a second run of the same workflow,
 which takes the no-op arm and finishes in three seconds — and GitHub's merge
 box shows only the NEWEST run per workflow. So the page said "All checks have
 passed" while a real review was five minutes into its work, and the author
-concluded it had never launched (caeli-marketing#227, 2026-09-03).
+concluded it had never launched (a private deployment, 2026-09-03).
 
 A commit status is shown independently of workflow runs, so one context —
 `agentic-review` — carries the truth: pending while the review runs, the
@@ -13,10 +13,10 @@ verdict when it posts, an error when the run died. It is never made a
 required check by this tool; that is the repository's decision.
 
 Best-effort throughout. The status is a courtesy to the reader, and a token
-without `statuses: write` must cost exactly one log line, not the review.
+without `statuses: write` must cost exactly one log line, not the review —
+so `set_status` catches EVERYTHING, and a dry run sets nothing at all.
 """
 import os
-import urllib.error
 
 from . import github
 from .config import ORG
@@ -40,6 +40,12 @@ def set_status(repo, sha, state, description):
     """One status. True if GitHub took it; False, with one log line, if not."""
     if not (repo and sha):
         return False
+    if os.environ.get("DRY"):
+        # THE DRY CONTRACT IS ENFORCED HERE, not at each call site: the entry
+        # point's failure path could not otherwise tell a rehearsal from a run.
+        print(f"[status] DRY: would set {state!r} on {sha[:7]}: {description[:60]}",
+              flush=True)
+        return False
     body = {"state": state, "context": CONTEXT,
             "description": description[:MAX_DESCRIPTION]}
     url = _run_url()
@@ -49,7 +55,7 @@ def set_status(repo, sha, state, description):
         github.request(f"/repos/{ORG}/{repo}/statuses/{sha}", method="POST",
                        body=body)
         return True
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except Exception as e:  # noqa: BLE001 — a courtesy must never cost the review
         code = getattr(e, "code", None)
         hint = (" — the bot token needs Commit statuses: read and write"
                 if code == 403 else "")

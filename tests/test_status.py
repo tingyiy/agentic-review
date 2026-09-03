@@ -1,6 +1,6 @@
 """The commit status: what the PR page says while the reviewer works.
 
-caeli-marketing#227, 2026-09-03: five minutes into a real review the merge
+2026-09-03, a private deployment: five minutes into a real review the merge
 box read "All checks have passed", because Copilot's automatic request had
 started a second, no-op run of the same workflow and GitHub shows only the
 newest run per workflow. The author concluded the review never launched.
@@ -93,6 +93,22 @@ class TestItNeverCostsTheReview:
     def test_a_network_failure_is_swallowed(self, monkeypatch):
         _capture(monkeypatch, fail=urllib.error.URLError("no route"))
         assert status.done("app", "abc123", "APPROVE", "0 finding(s)") is False
+
+    def test_a_dry_run_sets_nothing_on_any_path(self, monkeypatch, capsys):
+        """Copilot on this PR: the entry point's failure path posted an error
+        status from a DRY run. The contract is enforced in one place."""
+        posts = _capture(monkeypatch)
+        monkeypatch.setenv("DRY", "1")
+        assert status.pending("app", "abc123") is False
+        assert status.failed("app", "abc123", "boom") is False
+        assert posts == [] and "DRY" in capsys.readouterr().out
+
+    def test_an_unexpected_exception_is_swallowed_too(self, monkeypatch):
+        """`github.token()` raises ReviewError without a bot token; that must
+        not turn a status into a crash."""
+        from agentic_review.errors import ReviewError
+        _capture(monkeypatch, fail=ReviewError("no token"))
+        assert status.pending("app", "abc123") is False
 
     def test_no_sha_means_nothing_is_posted(self, monkeypatch):
         posts = _capture(monkeypatch)

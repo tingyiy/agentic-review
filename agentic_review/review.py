@@ -2531,10 +2531,10 @@ def main():
     # ON THE PR PAGE from here on. The merge box shows only the newest run of
     # a workflow, and Copilot's automatic request starts a no-op one a second
     # after ours — so the page said "all checks have passed" five minutes into
-    # a real review (caeli-marketing#227). A status context is shown regardless.
+    # a real review (2026-09-03). A status context is shown regardless; a dry
+    # run sets nothing (`status.set_status` enforces that for every path).
     _CURRENT["head"] = meta["head"]["sha"]
-    if not os.environ.get("DRY"):
-        status.pending(repo, meta["head"]["sha"])
+    status.pending(repo, meta["head"]["sha"])
 
     # So `_run_agent` can ask whether anything is superseding it without every
     # caller threading the pair through.
