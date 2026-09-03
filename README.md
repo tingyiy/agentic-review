@@ -1,5 +1,7 @@
 # agentic-review
 
+[![Tests](https://github.com/tingyiy/agentic-review/actions/workflows/tests.yml/badge.svg)](https://github.com/tingyiy/agentic-review/actions/workflows/tests.yml)
+
 A code reviewer that **runs inside a checkout of your pull request** and reads
 whatever it needs, instead of being handed a diff and asked to imagine the rest.
 
