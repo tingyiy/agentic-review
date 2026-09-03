@@ -60,12 +60,22 @@ def claude_md_size(work, changed_paths):
             source = f"this file's own stated ~{m.group(1)}k cap"
         over, why = [], []
         if size >= cap:
+            # Truncation is Claude Code's own threshold (CLAUDE_MD_MAX). A
+            # stricter cap the file declares for itself is a promise it broke,
+            # not a truncation risk — Copilot's point on the PR that split
+            # these: a 25k file with a stated 20k cap is still under 40k.
+            truncates = size >= CLAUDE_MD_MAX
             over.append(f"{size:,} bytes over {cap:,} ({size / cap:.1f}x, "
-                        f"{source}) — Claude Code may TRUNCATE it")
-            why.append("Past the byte cap Claude Code warns about degraded "
-                       "performance and may truncate the file, so rules at the "
-                       "bottom stop being read while still appearing to be in "
-                       "force.")
+                        f"{source})"
+                        + (" — Claude Code may TRUNCATE it" if truncates
+                           else " — its own stated limit"))
+            why.append(
+                "Past the byte cap Claude Code warns about degraded "
+                "performance and may truncate the file, so rules at the "
+                "bottom stop being read while still appearing to be in force."
+                if truncates else
+                "The file is over the cap it declares for itself; it is still "
+                "under the size at which Claude Code may truncate it.")
         if lines > CLAUDE_MD_MAX_LINES:
             over.append(f"{lines:,} lines over {CLAUDE_MD_MAX_LINES} "
                         f"({lines / CLAUDE_MD_MAX_LINES:.1f}x) — the docs' "
