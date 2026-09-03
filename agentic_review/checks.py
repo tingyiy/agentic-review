@@ -58,31 +58,48 @@ def claude_md_size(work, changed_paths):
         if m and int(m.group(1)) * 1000 < CLAUDE_MD_MAX:
             cap = int(m.group(1)) * 1000
             source = f"this file's own stated ~{m.group(1)}k cap"
-        over = []
+        over, why = [], []
         if size >= cap:
+            # Truncation is Claude Code's own threshold (CLAUDE_MD_MAX). A
+            # stricter cap the file declares for itself is a promise it broke,
+            # not a truncation risk — Copilot's point on the PR that split
+            # these: a 25k file with a stated 20k cap is still under 40k.
+            truncates = size >= CLAUDE_MD_MAX
             over.append(f"{size:,} bytes over {cap:,} ({size / cap:.1f}x, "
-                        f"{source}) — Claude Code may TRUNCATE it")
+                        f"{source})"
+                        + (" — Claude Code may TRUNCATE it" if truncates
+                           else " — its own stated limit"))
+            why.append(
+                "Past the byte cap Claude Code warns about degraded "
+                "performance and may truncate the file, so rules at the "
+                "bottom stop being read while still appearing to be in force."
+                if truncates else
+                "The file is over the cap it declares for itself; it is still "
+                "under the size at which Claude Code may truncate it.")
         if lines > CLAUDE_MD_MAX_LINES:
             over.append(f"{lines:,} lines over {CLAUDE_MD_MAX_LINES} "
                         f"({lines / CLAUDE_MD_MAX_LINES:.1f}x) — the docs' "
                         "adherence target")
+            why.append("Past the line target the whole file is still read, "
+                       "but followed less reliably; the number is claudelint's "
+                       "heuristic, not a Claude Code limit.")
         if not over:
             continue
+        # THE DETAIL SAYS ONLY WHAT FIRED. A file over the line target but
+        # under the byte cap used to be told it "may be truncated" — a claim
+        # about a threshold it had not crossed, which is the kind of thing a
+        # reader checks once and then stops trusting.
         out.append({
             "severity": "low",
             "file": path,
             "line": 1,
             "title": f"{path}: " + "; ".join(over),
             "detail": (
-                "Measured at this PR's head. Past the byte cap Claude Code "
-                "warns about degraded performance and may truncate the file, "
-                "so rules at the bottom stop being read while still appearing "
-                "to be in force. Past the line target the whole file is read "
-                "but followed less reliably. This is not a reason to hold the "
-                "PR (hence a nit); it is a reason to move per-ticket rationale "
-                "and migration history to the ticket, to push per-repo detail "
-                "down into that repo's own doc, or to split into "
-                "`.claude/rules/`."),
+                "Measured at this PR's head. " + " ".join(why) + " This is not "
+                "a reason to hold the PR (hence a nit); it is a reason to move "
+                "per-ticket rationale and migration history to the ticket, to "
+                "push per-repo detail down into that repo's own doc, or to "
+                "split into `.claude/rules/`."),
         })
     return out
 

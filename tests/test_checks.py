@@ -155,10 +155,33 @@ class TestClaudeMdSize:
         f, = checks.claude_md_size(w, ["CLAUDE.md"])
         assert "lines over 200" in f["title"]
 
+    def test_over_the_line_target_only_does_not_claim_truncation(self, tmp_path):
+        """445 lines and 30k bytes was told Claude Code 'may truncate the
+        file' — a claim about the byte cap it had not crossed. The detail
+        says only what fired."""
+        w = self._repo(tmp_path, "line\n" * 500)
+        f, = checks.claude_md_size(w, ["CLAUDE.md"])
+        assert "truncate" not in f["detail"].lower()
+        assert "followed less reliably" in f["detail"]
+
+    def test_over_the_byte_cap_does_say_truncation(self, tmp_path):
+        w = self._repo(tmp_path, "x" * 45_000)
+        f, = checks.claude_md_size(w, ["CLAUDE.md"])
+        assert "may truncate" in f["detail"]
+
     def test_a_stricter_self_declared_cap_is_honoured(self, tmp_path):
         w = self._repo(tmp_path, "# CLAUDE.md\n> hard cap ~20k chars\n" + "x" * 25_000)
         f, = checks.claude_md_size(w, ["CLAUDE.md"])
         assert "own stated ~20k cap" in f["title"]
+
+    def test_over_a_self_declared_cap_but_under_40k_does_not_claim_truncation(self, tmp_path):
+        """Copilot on the PR that split the wording: 25k with a stated 20k
+        cap is a broken promise, not a truncation risk."""
+        w = self._repo(tmp_path, "# CLAUDE.md\n> hard cap ~20k chars\n" + "x" * 25_000)
+        f, = checks.claude_md_size(w, ["CLAUDE.md"])
+        assert "truncate" not in f["title"].lower()
+        assert "truncate the file" not in f["detail"]
+        assert "cap it declares for itself" in f["detail"]
 
 
 class TestRunAll:
