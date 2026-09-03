@@ -1,0 +1,29 @@
+# The unit suite as a status check. GitHub-hosted on purpose: the suite is pure
+# Python with no network and no secrets, and it must not queue behind reviews on
+# the single self-hosted runner. (SCRUM-1230)
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: tests (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Only what the reviewer actually runs on (Mini is 3.12); pyproject's
+        # requires-python says the same, so declared support is tested support.
+        python: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[dev]'
+      - run: pytest -q

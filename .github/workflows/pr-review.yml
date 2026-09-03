@@ -1,0 +1,139 @@
+# Reusable AI code review. Call it from any repository with the caller in
+# `examples/pr-review-caller.yml`.
+#
+# NO SECRETS IN THE CALLER. The job runs on a self-hosted runner that already
+# holds the model key and the bot token — in its environment, or in the files
+# named by `env_files`. A reviewed repository contributes nothing but its code.
+#
+# A self-hosted job executes whatever a PR's workflow says, on that box. Keep
+# the runner group closed to public repositories and never attach a caller to
+# a repository that accepts pull requests from strangers.
+name: AI PR review
+
+on:
+  workflow_call:
+    inputs:
+      bot_login:
+        description: The GitHub login the reviewer posts as. A re-request for this login re-reviews.
+        type: string
+        required: true
+      reviewer_repo:
+        description: Where to fetch the reviewer from.
+        type: string
+        default: tingyiy/agentic-review
+      reviewer_ref:
+        description: >-
+          The commit (or branch) of the reviewer to run. PIN A COMMIT: bumping it
+          is then a reviewed change in this file, and a merge upstream reaches
+          your runner only when you say so.
+        type: string
+        default: main
+      runner:
+        description: JSON list of labels for the self-hosted runner that holds the credentials.
+        type: string
+        default: '["self-hosted"]'
+      env_files:
+        description: Colon-separated files the reviewer reads KEY=VALUE from (REVIEW_ENV_FILES).
+        type: string
+        default: ""
+      jira_site:
+        description: Atlassian site for ticket context; empty disables it.
+        type: string
+        default: ""
+
+permissions: {}
+
+# One review per PR at a time; a newer trigger supersedes an older one. A
+# comment run gets its own group so it can never cancel a review.
+concurrency:
+  group: >-
+    pr-review-${{ github.event.pull_request.number || github.event.issue.number }}-${{
+    ((github.event.pull_request
+      && github.event.pull_request.draft == false
+      && ((github.event.action != 'review_requested'
+           && (github.event.action != 'edited'
+               || github.event.changes.title
+               || github.event.changes.body)
+           && !startsWith(github.event.pull_request.head.ref, 'noreview/'))
+          || github.event.requested_reviewer.login == inputs.bot_login)))
+    && 'active' || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # The gate chooses the RUNNER rather than skipping the job: a skipped job
+    # prints its raw expression as the check title. When there is nothing to
+    # do, the job lands on GitHub-hosted and every step no-ops.
+    name: >-
+      review (${{ (github.event.pull_request
+      && github.event.pull_request.draft == false
+      && ((github.event.action != 'review_requested'
+      && (github.event.action != 'edited'
+      || github.event.changes.title
+      || github.event.changes.body)
+      && !startsWith(github.event.pull_request.head.ref, 'noreview/'))
+      || github.event.requested_reviewer.login == inputs.bot_login))
+      && 'agent'
+      || github.event.issue.pull_request
+      && github.event.comment.user.login == github.event.issue.user.login
+      && 'comment'
+      || startsWith(github.event.pull_request.head.ref, 'noreview/')
+      && 'no-review'
+      || 'not for us' }})
+    runs-on: >-
+      ${{ fromJSON(((github.event.pull_request
+      && github.event.pull_request.draft == false
+      && ((github.event.action != 'review_requested'
+      && (github.event.action != 'edited'
+      || github.event.changes.title
+      || github.event.changes.body)
+      && !startsWith(github.event.pull_request.head.ref, 'noreview/'))
+      || github.event.requested_reviewer.login == inputs.bot_login))
+      || (github.event.issue.pull_request
+      && github.event.comment.user.login == github.event.issue.user.login))
+      && inputs.runner || '["ubuntu-latest"]') }}
+    timeout-minutes: 25
+    steps:
+      - name: Fetch the reviewer
+        if: runner.environment == 'self-hosted'
+        env:
+          REVIEWER_REPO: ${{ inputs.reviewer_repo }}
+          REVIEWER_REF: ${{ inputs.reviewer_ref }}
+        run: |
+          set -euo pipefail
+          DIR="$RUNNER_TEMP/reviewer"
+          rm -rf "$DIR"; mkdir -p "$DIR"; cd "$DIR"
+          git init -q .
+          git remote add origin "https://github.com/${REVIEWER_REPO}.git"
+          git fetch -q --depth 1 origin "$REVIEWER_REF"
+          git checkout -q FETCH_HEAD
+          test -f agentic_review/__main__.py
+          test -f agentic_review/objection.py
+          echo "reviewer at $(git rev-parse --short FETCH_HEAD)"
+      - name: Review
+        if: runner.environment == 'self-hosted' && !github.event.comment
+        env:
+          REVIEW_ENV_FILES: ${{ inputs.env_files }}
+          REVIEW_JIRA_SITE: ${{ inputs.jira_site }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/reviewer"
+          python3 -m agentic_review \
+            "${{ github.event.repository.name }}" \
+            "${{ github.event.pull_request.number }}"
+      # An author's comment is a question, not a review: does it object to the
+      # last review? Only a yes re-requests the bot, through the ordinary path.
+      - name: Objection check
+        if: runner.environment == 'self-hosted' && github.event.comment
+        env:
+          REVIEW_ENV_FILES: ${{ inputs.env_files }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/reviewer"
+          python3 -m agentic_review.objection \
+            "${{ github.event.repository.name }}" \
+            "${{ github.event.issue.number }}" \
+            "${{ github.event.comment.id }}"
+      - name: Clean up
+        if: always() && runner.environment == 'self-hosted'
+        run: rm -rf "$RUNNER_TEMP/reviewer"

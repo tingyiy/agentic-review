@@ -1,0 +1,20 @@
+# Copy this file to `.github/workflows/pr-review-caller.yml` in every repository
+# that should get reviews, and fill in the inputs. This is the whole cost.
+name: PR review
+on:
+  pull_request:
+    # `edited` covers a title or description fix; `review_requested` is the
+    # re-review; `synchronize` is every push.
+    types: [opened, reopened, ready_for_review, review_requested, synchronize, edited]
+  # The author's comments run a short objection check; only a reply that
+  # disputes the review re-requests one.
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    uses: tingyiy/agentic-review/.github/workflows/pr-review.yml@main
+    with:
+      bot_login: your-review-bot
+      reviewer_ref: <pin a commit of tingyiy/agentic-review>
+      runner: '["self-hosted", "your-label"]'
+      env_files: "~/.config/agentic-review/.env"

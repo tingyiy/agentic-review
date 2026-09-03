@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Refuse an agent-attributed commit that does not link its session.
+#
+# The reviewer checks this too, and the two are not redundant: the reviewer
+# catches it minutes later on a PR that is already open, where fixing it means
+# amending published history or explaining it in the description. Here it costs
+# one aborted commit and a re-run with the trailer.
+#
+# NARROW ON PURPOSE. It fires on the standard attribution trailers — the ones an
+# agent actually writes — and NOT on the word "claude" appearing in a commit
+# message, because these repositories discuss Claude constantly and a hook that
+# blocks "Bump claude-sonnet-5 in the chain" is a hook people uninstall.
+#
+# Install:  hooks/install.sh            (this repo)
+#           hooks/install.sh <path>     (any other checkout)
+set -euo pipefail
+
+MSG_FILE="$1"
+MSG="$(cat "$MSG_FILE")"
+
+# A merge, a revert or a fixup carries somebody else's message. Blocking those
+# stops a rebase halfway through for a trailer the original author owns.
+case "$MSG" in
+  Merge\ *|Revert\ *|fixup!\ *|squash!\ *) exit 0 ;;
+esac
+
+ATTRIBUTION='Co-Authored-By:[[:space:]]*Claude|Generated with \[Claude Code|🤖 Generated with'
+# The full link or the bare id — either names the run.
+# The full link, the bare id, or a labelled local transcript UUID — each names the run.
+UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+SESSION="https://claude\\.ai/(code/)?session[_/][A-Za-z0-9_-]+|(^|[^A-Za-z0-9_/])session_[A-Za-z0-9]{8,}|([Ss]ession|[Tt]ranscript).{0,60}$UUID|\\.claude/projects/[^ ]*$UUID"
+
+if ! grep -Eqi "$ATTRIBUTION" <<<"$MSG"; then
+  exit 0
+fi
+if grep -Eq "$SESSION" <<<"$MSG"; then
+  exit 0
+fi
+
+cat >&2 <<'EOF'
+
+  This commit is attributed to an AI agent but does not link its session.
+
+  The attribution says a machine wrote it. The link says WHICH RUN — what it
+  was asked, what it tried, and what it was told. When an agent-written change
+  turns out to be wrong, that transcript is the only thing that explains why,
+  and it cannot be reconstructed afterwards.
+
+  Add a trailer:
+
+      Claude-Session: https://claude.ai/code/session_XXXXXXXXXXXXXXXX
+
+  Then commit again. To bypass once (a cherry-pick of somebody else's work,
+  say):  git commit --no-verify
+
+EOF
+exit 1
