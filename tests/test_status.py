@@ -12,8 +12,13 @@ import pytest
 
 from agentic_review import status
 
+#: The real sender, taken at import — before the autouse conftest fixture
+#: replaces `status.set_status` with a recorder for every other test.
+_REAL_SET_STATUS = status.set_status
+
 
 def _capture(monkeypatch, fail=None):
+    monkeypatch.setattr(status, "set_status", _REAL_SET_STATUS)
     posts = []
 
     def request(path, method="GET", body=None, accept=""):
