@@ -121,7 +121,8 @@ class TestTheEntryPointClearsPending:
         seen = []
         monkeypatch.setattr(entry.status, "failed", lambda r, s, why: seen.append((r, s, why)))
         monkeypatch.setattr(entry.notify, "alert", lambda m: None)
-        entry._CURRENT.update(repo="app", head="abc123")
+        monkeypatch.setitem(entry._CURRENT, "repo", "app")
+        monkeypatch.setitem(entry._CURRENT, "head", "abc123")
         monkeypatch.setattr(entry, "_main_unless_superseded",
                             lambda: (_ for _ in ()).throw(RuntimeError("boom")))
         with pytest.raises(SystemExit):
@@ -160,6 +161,15 @@ class TestTheWiringInMain:
         monkeypatch.delenv("DRY", raising=False)
         pr.main()
 
+    def test_the_head_is_recorded_as_soon_as_the_metadata_is(self, monkeypatch):
+        """So a failure in pr_diff or the nothing-new check still gets its
+        error status (Copilot's third round)."""
+        from agentic_review import review
+        order = []
+        monkeypatch.setitem(review._CURRENT, "head", None)
+        self._drive(None, monkeypatch, order, nothing_new="same commit")
+        assert review._CURRENT["head"] == "a" * 40
+
     def test_pending_after_the_nothing_new_guard_and_before_the_checkout(self, monkeypatch):
         order = []
         self._drive(None, monkeypatch, order)
@@ -175,6 +185,22 @@ class TestTheWiringInMain:
         order = []
         self._drive(None, monkeypatch, order, nothing_new="same commit")
         assert order == ["nothing-new check"]
+
+    def test_the_timeout_reaches_urlopen(self, monkeypatch):
+        """Copilot's third round: the previous test mocked github.request, so
+        it stayed green if the forwarding to _send and to urlopen was lost."""
+        import io
+        from agentic_review import github as gh_mod
+        seen = {}
+        class _R(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def urlopen(req, timeout=None):
+            seen["timeout"] = timeout; return _R(b"{}")
+        monkeypatch.setattr(gh_mod.urllib.request, "urlopen", urlopen)
+        monkeypatch.setattr(gh_mod, "token", lambda review=True: "t")
+        gh_mod.request("/x", method="POST", body={"a": 1}, timeout=15)
+        assert seen["timeout"] == 15
 
     def test_the_status_uses_a_short_timeout(self, monkeypatch):
         seen = {}

@@ -2509,6 +2509,9 @@ def main():
         return
     print(f"{repo}#{pr}: {meta.get('title', '')!r} by {meta['user']['login']} "
           f"@ {meta['head']['sha'][:12]}", flush=True)
+    # Known from here, so a failure anywhere below can still mark the head —
+    # the pending status itself waits until the nothing-new guard has passed.
+    _CURRENT["head"] = meta["head"]["sha"]
     diff, excluded, skipped = pr_diff(repo, pr)
     truncated = bool(excluded)
     if not diff.strip():
@@ -2533,7 +2536,6 @@ def main():
     # after ours — so the page said "all checks have passed" five minutes into
     # a real review (2026-09-03). A status context is shown regardless; a dry
     # run sets nothing (`status.set_status` enforces that for every path).
-    _CURRENT["head"] = meta["head"]["sha"]
     status.pending(repo, meta["head"]["sha"])
 
     # So `_run_agent` can ask whether anything is superseding it without every
