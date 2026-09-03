@@ -21,7 +21,7 @@ def _capture(monkeypatch, fail=None):
     monkeypatch.setattr(status, "set_status", _REAL_SET_STATUS)
     posts = []
 
-    def request(path, method="GET", body=None, accept=""):
+    def request(path, method="GET", body=None, accept="", timeout=60):
         if fail is not None:
             raise fail
         posts.append((method, path, body))
@@ -127,3 +127,61 @@ class TestTheEntryPointClearsPending:
         with pytest.raises(SystemExit):
             entry.main()
         assert seen == [("app", "abc123", "RuntimeError: boom")]
+
+
+class TestTheWiringInMain:
+    """Copilot's suppressed comment on this PR: the helpers were tested, the
+    orchestration was not — a regression removing the calls stayed green."""
+
+    def _drive(self, pr, monkeypatch, order, nothing_new=""):
+        import json
+        from agentic_review import review as pr
+        monkeypatch.setattr(pr, "review_findings", lambda *a, **k: [])
+        monkeypatch.setattr(pr, "_revise", lambda f, w, r: (f, []))
+        monkeypatch.setattr(pr.checks, "run_all", lambda *a, **k: [])
+        monkeypatch.setattr(pr, "checkout", lambda *a: order.append("checkout"))
+        monkeypatch.setattr(pr, "build_context", lambda *a: "")
+        monkeypatch.setattr(pr, "conversation", lambda *a: "")
+        monkeypatch.setattr(pr, "commit_messages", lambda *a: [])
+        monkeypatch.setattr(pr, "pr_diff", lambda *a: ("--- a/x\n+++ b/x\n@@\n", False, 0))
+        monkeypatch.setattr(pr, "_already_reviewed",
+                            lambda *a, **k: order.append("nothing-new check") or nothing_new)
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr, "post_review",
+                            lambda *a, **k: order.append("post") or "APPROVE")
+        monkeypatch.setattr(pr.status, "pending",
+                            lambda repo, sha: order.append(("pending", repo, sha)))
+        monkeypatch.setattr(pr.status, "done",
+                            lambda repo, sha, event, summary: order.append(("done", event, summary)))
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "a" * 40}}))
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+
+    def test_pending_after_the_nothing_new_guard_and_before_the_checkout(self, monkeypatch):
+        order = []
+        self._drive(None, monkeypatch, order)
+        assert order[:3] == ["nothing-new check", ("pending", "app", "a" * 40), "checkout"]
+
+    def test_the_verdict_is_set_after_the_post(self, monkeypatch):
+        order = []
+        self._drive(None, monkeypatch, order)
+        assert order[-2:] == ["post", ("done", "APPROVE", "0 finding(s): none")]
+
+    def test_a_skipped_review_sets_no_status(self, monkeypatch):
+        """Nothing new to review means the earlier status still tells the truth."""
+        order = []
+        self._drive(None, monkeypatch, order, nothing_new="same commit")
+        assert order == ["nothing-new check"]
+
+    def test_the_status_uses_a_short_timeout(self, monkeypatch):
+        seen = {}
+        def request(path, method="GET", body=None, accept="", timeout=60):
+            seen["timeout"] = timeout; return "{}"
+        monkeypatch.setattr(status, "set_status", _REAL_SET_STATUS)
+        monkeypatch.setattr(status.github, "request", request)
+        monkeypatch.setattr(status, "ORG", "example-org")
+        status.pending("app", "abc123")
+        assert seen["timeout"] < 60

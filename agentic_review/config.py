@@ -41,6 +41,10 @@ JIRA_SITE = os.environ.get("REVIEW_JIRA_SITE", "")
 
 #: Files whose contents are handed to the reviewer verbatim, in this order,
 #: when they exist at the repository root or beside a changed file.
+#: The commit-status context the reviewer sets on the PR head (pending while it
+#: runs, the verdict when it posts). Rename it if another tool already owns it.
+STATUS_CONTEXT = os.environ.get("REVIEW_STATUS_CONTEXT", "agentic-review")
+
 CONVENTION_DOCS = [d for d in os.environ.get(
     "REVIEW_CONVENTION_DOCS", "CLAUDE.md,AGENTS.md,CONTRIBUTING.md,README.md"
 ).split(",") if d.strip()]

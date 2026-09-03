@@ -19,12 +19,14 @@ so `set_status` catches EVERYTHING, and a dry run sets nothing at all.
 import os
 
 from . import github
-from .config import ORG
-
-CONTEXT = os.environ.get("REVIEW_STATUS_CONTEXT", "agentic-review")
+from .config import ORG, STATUS_CONTEXT as CONTEXT
 
 #: GitHub's limit for a status description.
 MAX_DESCRIPTION = 140
+
+#: A status is a courtesy on the way to the review; it must not be allowed to
+#: hold the review up for the full request timeout when GitHub is slow.
+TIMEOUT = 15
 
 
 def _run_url():
@@ -53,7 +55,7 @@ def set_status(repo, sha, state, description):
         body["target_url"] = url
     try:
         github.request(f"/repos/{ORG}/{repo}/statuses/{sha}", method="POST",
-                       body=body)
+                       body=body, timeout=TIMEOUT)
         return True
     except Exception as e:  # noqa: BLE001 — a courtesy must never cost the review
         code = getattr(e, "code", None)

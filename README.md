@@ -112,6 +112,7 @@ default:
 | `REVIEW_CONVENTION_DOCS` | `CLAUDE.md,AGENTS.md,CONTRIBUTING.md,README.md` | what counts as the rules |
 | `REVIEW_AGENT_TIMEOUT` | `900` | wall clock for one pass |
 | `REVIEW_ALERT_COMMAND` | *(unset)* | shell command that receives failures on stdin |
+| `REVIEW_STATUS_CONTEXT` | `agentic-review` | the commit status the reviewer sets on the PR head (pending → verdict) |
 
 ### As a GitHub Action
 
