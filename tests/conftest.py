@@ -49,3 +49,15 @@ def _agent_looked_by_default(monkeypatch):
     """
     from agentic_review import review
     monkeypatch.setitem(review._CURRENT, "stats", {"turns": 4, "tool_calls": 6})
+
+
+@pytest.fixture(autouse=True)
+def _no_commit_status(monkeypatch):
+    """The commit status is a side channel every `main()`-driving test would
+    otherwise hit for real. Recorded, not sent; a test that cares reads it."""
+    from agentic_review import status
+    sent = []
+    monkeypatch.setattr(status, "set_status",
+                        lambda repo, sha, state, description:
+                        sent.append((repo, sha, state, description)) or True)
+    return sent
