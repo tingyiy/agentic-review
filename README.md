@@ -98,6 +98,11 @@ it appears as *you reviewing your own pull request*, and afterwards it cannot be
 told apart from a real review in the PR timeline. `REVIEW_GITHUB_TOKEN` should
 be a bot account, and the tool refuses to post without one.
 
+The token also needs **Commit statuses: read and write** for the
+`agentic-review` status the reviewer sets on the PR head (pending while it
+runs, the verdict when it posts). Without it the status is skipped with one
+log line and the review still posts.
+
 ### Configuration
 
 Everything lives in `agentic_review/config.py` and every value has a working
@@ -112,6 +117,7 @@ default:
 | `REVIEW_CONVENTION_DOCS` | `CLAUDE.md,AGENTS.md,CONTRIBUTING.md,README.md` | what counts as the rules |
 | `REVIEW_AGENT_TIMEOUT` | `900` | wall clock for one pass |
 | `REVIEW_ALERT_COMMAND` | *(unset)* | shell command that receives failures on stdin |
+| `REVIEW_STATUS_CONTEXT` | `agentic-review` | the commit status the reviewer sets on the PR head (pending → verdict) |
 
 ### As a GitHub Action
 

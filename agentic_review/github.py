@@ -49,7 +49,7 @@ def token(review=True):
 
 
 def request(path, method="GET", body=None, accept="application/vnd.github+json",
-            token_for_review=True):
+            token_for_review=True, timeout=60):
     """One GitHub REST call. Returns the response body as text.
 
     Deliberately not paginated: every caller that can exceed one page asks for
@@ -65,7 +65,7 @@ def request(path, method="GET", body=None, accept="application/vnd.github+json",
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    return _send(req)
+    return _send(req, timeout=timeout)
 
 
 #: Failures that mean "the connection died", not "GitHub said no". A dropped
@@ -77,7 +77,7 @@ def request(path, method="GET", body=None, accept="application/vnd.github+json",
 _DROPPED = (http.client.IncompleteRead, ConnectionError)
 
 
-def _send(req, attempts=2):
+def _send(req, attempts=2, timeout=60):
     # ONLY A GET IS RETRIED. A dropped connection says nothing about whether
     # the server acted: an `IncompleteRead` on `POST .../reviews` is a review
     # that may already be posted, and sending it again posts it twice (the
@@ -87,7 +87,7 @@ def _send(req, attempts=2):
         attempts = 1
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read().decode()
         except _DROPPED as e:
             if attempt + 1 >= attempts:

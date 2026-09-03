@@ -56,6 +56,7 @@ from . import checks
 from . import context as ctx
 from . import github
 from . import llm
+from . import status
 from . import tracker
 from .config import AGENT_TIMEOUT, MAX_DIFF, MAX_FINDINGS, ORG
 from .errors import AgentFailed, PRClosed, ReviewError, Superseded
@@ -2508,6 +2509,9 @@ def main():
         return
     print(f"{repo}#{pr}: {meta.get('title', '')!r} by {meta['user']['login']} "
           f"@ {meta['head']['sha'][:12]}", flush=True)
+    # Known from here, so a failure anywhere below can still mark the head —
+    # the pending status itself waits until the nothing-new guard has passed.
+    _CURRENT["head"] = meta["head"]["sha"]
     diff, excluded, skipped = pr_diff(repo, pr)
     truncated = bool(excluded)
     if not diff.strip():
@@ -2526,6 +2530,13 @@ def main():
     if nothing_new:
         print(f"nothing new to review: {nothing_new}")
         return
+
+    # ON THE PR PAGE from here on. The merge box shows only the newest run of
+    # a workflow, and Copilot's automatic request starts a no-op one a second
+    # after ours — so the page said "all checks have passed" five minutes into
+    # a real review (2026-09-03). A status context is shown regardless; a dry
+    # run sets nothing (`status.set_status` enforces that for every path).
+    status.pending(repo, meta["head"]["sha"])
 
     # So `_run_agent` can ask whether anything is superseding it without every
     # caller threading the pair through.
@@ -2602,6 +2613,8 @@ def main():
     event = post_review(repo, pr, event, body,
                         head_sha=head_sha, truncated=truncated)
     print(f"{event}: {len(findings)} finding(s)")
+    status.done(repo, head_sha, event,
+                f"{len(findings)} finding(s): {severity_breakdown(findings)}")
 
 
 def _release_review_request(repo, pr):
