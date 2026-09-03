@@ -127,8 +127,13 @@ model key and the bot token — no secrets in any reviewed repository.
 `examples/pr-review-caller.yml` is the entire per-repository cost: copy it into
 each repo that should get reviews and fill in the three inputs.
 
-This repository itself carries no caller: it has no self-hosted runner, and a
-job that waits for one forever is worse than no job.
+**GitHub-hosted instead of self-hosted.** Set `runner: '["ubuntu-latest"]'`,
+hand the model key in as a repository secret, and set `post_as_actions_bot:
+true` so the workflow's own token posts the review as `github-actions[bot]` —
+no personal access token anywhere. GitHub withholds secrets from a fork's pull
+request, so a stranger's PR runs without a key and the review step skips with
+a log line. This repository reviews itself that way
+(`.github/workflows/pr-review-caller.yml`).
 
 ## Reasoning is off, and that is measured
 

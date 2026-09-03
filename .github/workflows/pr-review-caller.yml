@@ -1,0 +1,25 @@
+# This repository reviews its own pull requests on GitHub-hosted runners, with
+# its keys as repository secrets and the review posted by the workflow's own
+# token. A fork's pull request gets no secrets, so the review step skips.
+name: PR review
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, review_requested, synchronize, edited]
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+  actions: read
+jobs:
+  review:
+    uses: tingyiy/agentic-review/.github/workflows/pr-review.yml@main
+    with:
+      bot_login: github-actions[bot]
+      post_as_actions_bot: true
+      runner: '["ubuntu-latest"]'
+      ticket_pattern: ""     # no tracker here
+    secrets:
+      FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
