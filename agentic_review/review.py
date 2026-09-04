@@ -1991,6 +1991,18 @@ def _verdict_withheld(body, event):
     return note + cleaned
 
 
+def _write_step_summary(repo, pr, event, body):
+    """The run page's copy of what was POSTED. Never raises."""
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary:
+        return
+    try:
+        with open(summary, "a") as fh:
+            fh.write(f"## {event} — {repo}#{pr}\n\n{body}\n")
+    except OSError as e:
+        print(f"  (could not write step summary: {e})", flush=True)
+
+
 def post_review(repo, pr, event, body, head_sha="", truncated=False):
     """POST the review; return the event actually posted.
 
@@ -2037,6 +2049,12 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
         # and SAY which verdict was withheld, so a clean review is not read as
         # an approval that never happened.
         post("COMMENT", _verdict_withheld(body, event))
+        # THE SAME RECONCILIATION A REAL COMMENT GETS. The fallback returned
+        # early and skipped it, so a clean review on a newer head left our own
+        # older CHANGES_REQUESTED standing — an approval would have superseded
+        # it, and this comment is what that approval turned into.
+        for rid in _withdraw_stale_approval(repo, pr, head_sha):
+            print(f"  withdrew our own now-stale APPROVE ({rid})")
         why = ("own PR" if SELF_REVIEW_REFUSAL in low
                else "this token may not set a verdict")
         return f"COMMENT ({event.lower().replace('_', ' ')} refused — {why})"
@@ -2703,20 +2721,21 @@ def main():
     # opening the PR, and a review that was posted and then dismissed still has
     # a record. Best-effort: there is no summary file outside Actions, and
     # failing to write a nicety must never cost the review.
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        try:
-            with open(summary, "a") as fh:
-                fh.write(f"## {event} — {repo}#{pr}\n\n{body}\n")
-        except OSError as e:
-            print(f"  (could not write step summary: {e})", flush=True)
-
     if os.environ.get("DRY"):
+        _write_step_summary(repo, pr, event, body)
         print(f"--- would post {event} ---\n{body}")
         return
 
-    event = post_review(repo, pr, event, body,
-                        head_sha=head_sha, truncated=truncated)
+    # AFTER the POST, because the POST can change both. A refused approval
+    # becomes a comment carrying different text, and writing the summary first
+    # left the run page reporting a clean approval GitHub had declined — the
+    # very claim the fallback exists to retract.
+    posted = post_review(repo, pr, event, body,
+                         head_sha=head_sha, truncated=truncated)
+    _write_step_summary(repo, pr, posted,
+                        _verdict_withheld(body, event)
+                        if posted.startswith("COMMENT (") else body)
+    event = posted
     print(f"{event}: {len(findings)} finding(s)")
     status.done(repo, head_sha, event,
                 f"{len(findings)} finding(s): {severity_breakdown(findings)}")

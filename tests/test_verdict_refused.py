@@ -27,7 +27,10 @@ def _wire(monkeypatch, refusal_body):
                     io.BytesIO(refusal_body.encode()))
         return "[]"
     monkeypatch.setattr(pr, "gh", gh)
-    monkeypatch.setattr(pr, "_withdraw_stale_approval", lambda *a: None)
+    # Returns the ids it withdrew; the fallback iterates them, as a real
+    # COMMENT does — a refused approval leaves an older block standing
+    # otherwise.
+    monkeypatch.setattr(pr, "_withdraw_stale_approval", lambda *a: [])
     return posted
 
 
@@ -118,3 +121,19 @@ class TestTheFallbackCommentDoesNotClaimAnApproval:
                        "### AI review\n\n🔴 **a real defect** — detail")
         text = next(t for ev, t in posted if ev == "COMMENT")
         assert "a real defect" in text and "would not record a `request changes`" in text
+
+
+class TestTheFallbackReconcilesLikeARealComment:
+    """A refused APPROVE becomes a COMMENT, and a COMMENT is exactly the state
+    that leaves an older verdict of ours standing. The fallback returned early
+    and skipped the reconciliation a real comment gets."""
+
+    def test_it_withdraws_our_own_stale_verdict(self, monkeypatch):
+        withdrawn = []
+        posted = _wire(monkeypatch,
+                       '{"errors":["GitHub Apps are not permitted to approve"]}')
+        monkeypatch.setattr(pr, "_withdraw_stale_approval",
+                            lambda repo, n, sha: withdrawn.append(sha) or ["r1"])
+        pr.post_review("app", 1, "APPROVE", "body", head_sha="a" * 40)
+        assert [ev for ev, _ in posted] == ["APPROVE", "COMMENT"]
+        assert withdrawn == ["a" * 40]
