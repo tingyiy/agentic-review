@@ -1629,6 +1629,7 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     what actually gets posted for a given (findings, withdrawn) pair, which is
     the thing that matters.
     """
+    unseen = False
     body = (approval_body(head_sha, repo=repo, wire_fields=wire_fields, diff=diff,
                           excluded=excluded)
             if not findings
@@ -1647,8 +1648,19 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     if event == "APPROVE" and not (
             saw_every_change if saw_every_change is not None else not excluded):
         event = "COMMENT"
-    return _apply_withdrawals(body, event=event,
-                              findings=findings, withdrawn=withdrawn)
+        unseen = True
+    body, event = _apply_withdrawals(body, event=event,
+                                     findings=findings, withdrawn=withdrawn)
+    # LAST, so it rewrites whatever prose actually survived. With every
+    # excluded file opened there is no unreviewed-files note to carry the news,
+    # so the approval wording would otherwise stand above a COMMENT — the same
+    # false-clean verdict as a refused approval, reached by a different route.
+    if unseen:
+        body = _changes_unseen_note() + body.replace(
+            "### AI review — no findings\n",
+            "### AI review — no findings, and not an approval\n").replace(
+            "**What this approval is.**", "**What this would have been.**")
+    return body, event
 
 
 def _one_pass(prompt, work, what):
@@ -2264,6 +2276,20 @@ def _unchecked_consumers_note(repo, wire_fields):
     return (f" It read only `{repo or 'this repo'}`, and {names} "
             f"{'cross' if len(wire_fields) > 1 else 'crosses'} a wire boundary — "
             "consumers in other repositories were NOT checked.")
+
+
+def _changes_unseen_note():
+    """Why a clean review is not an approval when the diff did not fit.
+
+    The files were read — that is why there is no unreviewed-files note — but
+    `read_file` returns the HEAD version, and their patches were never shown.
+    Reading what the code says now is not seeing what the change did to it.
+    """
+    return ("> **⚠️ Not an approval.** Some changed files did not fit the diff "
+            "budget. The agent opened them in the checkout, so nothing went "
+            "unlooked-at — but it saw them AS THEY NOW STAND, not the changes "
+            "made to them. A clean result on that basis is worth reading and "
+            "is not an approval.\n\n")
 
 
 def _unreviewed_files_note(excluded):

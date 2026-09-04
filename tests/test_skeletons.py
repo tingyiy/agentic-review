@@ -470,3 +470,39 @@ class TestSequentialWindowsCoverTheFile:
         been changed to name it."""
         assert "still NAMED" in ctx.skeletons.__doc__
         assert "simply absent" not in ctx.skeletons.__doc__
+
+
+class TestTheSeventhRound:
+    def test_a_clean_result_on_unseen_changes_does_not_read_as_an_approval(self):
+        """With every excluded file OPENED there is no unreviewed-files note to
+        carry the news, so the approval prose stood alone above a COMMENT — the
+        same false-clean verdict as a refused approval, by another route."""
+        from agentic_review import review as pr
+        body, event = pr._finalize_review([], [], head_sha="a" * 40, repo="r",
+                                          excluded=[], saw_every_change=False)
+        assert event == "COMMENT"
+        assert "Not an approval" in body
+        assert "**What this approval is.**" not in body
+        assert "not seeing what the change did to it" in body or \
+               "not the changes made to them" in body
+
+    def test_a_genuine_approval_is_untouched(self):
+        from agentic_review import review as pr
+        body, event = pr._finalize_review([], [], head_sha="a" * 40, repo="r",
+                                          excluded=[], saw_every_change=True)
+        assert event == "APPROVE"
+        assert "Not an approval" not in body
+        assert "**What this approval is.**" in body
+
+    def test_a_marker_inside_the_file_is_not_metadata_about_it(self):
+        """Both markers are APPENDED by the tools. A file whose own content
+        contains the literal text would otherwise be read as a report about
+        itself — and this repository's own source contains both strings."""
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(
+            stats, "read_file", '{"path": "agent.py"}',
+            '1\t_CLIPPED = "[... truncated: 12 more chars."\n'
+            '2\t_PARTIAL = "[showing lines 1-2 of 9."\n3\tdone')
+        assert stats["opened"] == {"agent.py"}, (
+            "content that looks like a marker is not a marker")

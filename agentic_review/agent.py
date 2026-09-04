@@ -157,7 +157,12 @@ def _record_opened(stats, name, raw, result):
         return
     # A CLIPPED RESULT SHOWS LESS THAN IT SAYS. `_truncate` keeps the head and
     # drops the tail, footer included, so the window's own end is unknown.
-    if _CLIPPED_RESULT.search(text):
+    # ANCHORED TO THE END. Both markers are the LAST thing `_read_file` and
+    # `_truncate` write, and a file whose own content contains the literal
+    # text would otherwise be read as metadata about itself — this
+    # repository's source contains both strings.
+    tail = text.rstrip()
+    if _CLIPPED_RESULT.search(tail):
         return
     try:
         args = json.loads(raw or "{}") or {}
@@ -171,7 +176,7 @@ def _record_opened(stats, name, raw, result):
 
     seen = stats.setdefault("_read_ranges", {}).setdefault(
         path, {"total": None, "covered": []})
-    window = _PARTIAL_READ.search(text)
+    window = _PARTIAL_READ.search(tail)
     if window:
         start, end, total = (int(g) for g in window.groups())
         seen["total"] = total
@@ -388,8 +393,8 @@ _DISPATCH = {"read_file": _read_file, "grep": _grep, "list_files": _list_files}
 #: run past MAX_TOOL_CHARS loses the footer entirely. That is exactly the large
 #: file where a partial read matters, and checking the footer alone would have
 #: called it complete. A clipped result is not a complete read either way.
-_PARTIAL_READ = re.compile(r"\[showing lines (\d+)-(\d+) of (\d+)\.")
-_CLIPPED_RESULT = re.compile(r"\[\.\.\. truncated: \d+ more chars\.")
+_PARTIAL_READ = re.compile(r"\[showing lines (\d+)-(\d+) of (\d+)\.[^\]]*\]\s*$")
+_CLIPPED_RESULT = re.compile(r"\[\.\.\. truncated: \d+ more chars\.[^\]]*\]\s*$")
 
 #: How `_call_tool` spells a failure. A tool result is a string either way, so
 #: anything reading results — `_record_opened`, for one — has to be able to
