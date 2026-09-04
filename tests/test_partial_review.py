@@ -150,7 +150,7 @@ class TestTheModelIsToldByName:
         # was something the model could open and mostly did not.
         assert "FILES THIS DIFF HAD NO ROOM FOR" in seen["prompt"]
         assert "src/big.py" in seen["prompt"]
-        assert "read_file` works on them" in seen["prompt"]
+        assert "`read_file` reaches any" in seen["prompt"]
         # Its shape, so the model can decide whether to open it.
         assert "6 lines" in seen["prompt"]
         assert "alpha:1" in seen["prompt"] and "Beta:5" in seen["prompt"]

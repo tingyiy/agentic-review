@@ -64,7 +64,7 @@ class TestTheSection:
     def test_it_tells_the_model_the_files_are_readable(self, tmp_path):
         w = _repo(tmp_path, {"src/a.py": "def alpha():\n    pass\n"})
         out = ctx.skeletons(w, ["src/a.py"])
-        assert "read_file` works on them" in out
+        assert "`read_file` reaches any" in out
         assert "unreviewed if you do not look" in out
         assert "alpha:1" in out
 

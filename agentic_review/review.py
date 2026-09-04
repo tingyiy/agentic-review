@@ -1671,7 +1671,10 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     # excluded file opened there is no unreviewed-files note to carry the news,
     # so the approval wording would otherwise stand above a COMMENT — the same
     # false-clean verdict as a refused approval, reached by a different route.
-    if unseen:
+    # ONLY WHEN THERE IS NO OTHER NOTE. If files remain unopened,
+    # `_unreviewed_files_note` is already at the top saying this is not an
+    # approval, and two notes making overlapping claims read as a bug.
+    if unseen and not excluded:
         body = _changes_unseen_note() + body.replace(
             "### AI review — no findings\n",
             "### AI review — no findings, and not an approval\n").replace(

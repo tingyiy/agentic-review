@@ -607,13 +607,16 @@ def skeletons(work, paths):
     if dropped:
         # SAY WHAT WAS CUT, like every other truncation here. A list that reads
         # as exhaustive stops the model looking for what is missing from it.
-        rows.append(f"- (and {dropped} more not shown — they are in the "
-                    f"checkout and `read_file` works on them)")
-    return ("\nFILES THIS DIFF HAD NO ROOM FOR. They are in the checkout and\n"
-            "`read_file` works on them — what follows is their shape, so you can\n"
-            "decide which are worth opening. A change is not unreviewed because\n"
-            "it did not fit; it is unreviewed if you do not look. Open the ones\n"
-            "the change depends on, and say in your findings if you did not.\n\n"
+        rows.append(f"- (and {dropped} more not shown — they are changed "
+                    f"files in this PR; `read_file` reaches any that still "
+                    f"exist in the checkout)")
+    return ("\nFILES THIS DIFF HAD NO ROOM FOR. What follows is their shape, so\n"
+            "you can decide which are worth opening; `read_file` reaches any\n"
+            "that still exist in the checkout, and a row saying its shape is\n"
+            "unavailable means that one does not — deleted by this change, or\n"
+            "not a readable file. A change is not unreviewed because it did not\n"
+            "fit; it is unreviewed if you do not look. Open the ones the change\n"
+            "depends on, and say in your findings if you did not.\n\n"
             + "\n".join(rows) + "\n")
 
 
