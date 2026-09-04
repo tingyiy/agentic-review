@@ -506,3 +506,48 @@ class TestTheSeventhRound:
             '2\t_PARTIAL = "[showing lines 1-2 of 9."\n3\tdone')
         assert stats["opened"] == {"agent.py"}, (
             "content that looks like a marker is not a marker")
+
+
+class TestTheEighthRound:
+    def test_windows_landing_in_different_passes_still_cover_the_file(self):
+        """The review pass reads lines 1-200 and the revision reads the rest.
+        Merging only the finished `opened` sets left that file reported as
+        never opened — a false caveat on the exact files this feature is for."""
+        from agentic_review import review as pr
+        pr._CURRENT["opened"] = set()
+        pr._CURRENT["read_ranges"] = {}
+        pr._merge_opened({"_read_ranges": {
+            "big.py": {"total": 255, "covered": [(1, 200)]}}})
+        assert pr._CURRENT["opened"] == set(), "half a file is not the file"
+        pr._merge_opened({"_read_ranges": {
+            "big.py": {"total": 255, "covered": [(201, 255)]}}})
+        assert pr._CURRENT["opened"] == {"big.py"}
+
+    def test_a_gap_across_passes_is_still_a_gap(self):
+        from agentic_review import review as pr
+        pr._CURRENT["opened"] = set()
+        pr._CURRENT["read_ranges"] = {}
+        pr._merge_opened({"_read_ranges": {
+            "g.py": {"total": 300, "covered": [(1, 100)]}}})
+        pr._merge_opened({"_read_ranges": {
+            "g.py": {"total": 300, "covered": [(201, 300)]}}})
+        assert pr._CURRENT["opened"] == set()
+
+    def test_a_content_line_that_looks_like_the_footer_is_not_the_footer(self):
+        """`_read_file` prefixes every content line with `N<tab>`; the footer
+        sits on a line of its own. Without the line anchor, a file whose last
+        line reads `5<tab>[showing lines 1-2 of 9.]` reported itself partial."""
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(
+            stats, "read_file", '{"path": "doc.py"}',
+            "1\tx\n5\t[showing lines 1-2 of 9. Call again with offset=3 for the rest.]")
+        assert stats["opened"] == {"doc.py"}
+
+    def test_the_real_footer_on_its_own_line_still_counts_as_partial(self):
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(
+            stats, "read_file", '{"path": "big.py"}',
+            "1\tx\n[showing lines 1-200 of 255. Call again with offset=201 for the rest.]")
+        assert stats.get("opened") is None

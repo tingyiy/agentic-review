@@ -157,10 +157,12 @@ def _record_opened(stats, name, raw, result):
         return
     # A CLIPPED RESULT SHOWS LESS THAN IT SAYS. `_truncate` keeps the head and
     # drops the tail, footer included, so the window's own end is unknown.
-    # ANCHORED TO THE END. Both markers are the LAST thing `_read_file` and
-    # `_truncate` write, and a file whose own content contains the literal
-    # text would otherwise be read as metadata about itself — this
-    # repository's source contains both strings.
+    # ANCHORED TO A LINE OF THEIR OWN, AT THE END. Both markers are the last
+    # thing `_read_file` and `_truncate` write, and each sits on its own line —
+    # while every content line carries a `N<tab>` prefix. Without the line
+    # anchor a file whose own last line reads `5<tab>[showing lines 1-2 of 9.]`
+    # reported itself as partially read; this repository's source contains both
+    # strings.
     tail = text.rstrip()
     if _CLIPPED_RESULT.search(tail):
         return
@@ -185,20 +187,24 @@ def _record_opened(stats, name, raw, result):
         # No footer: this window ran to the end of the file.
         seen["covered"].append((offset, None))
 
-    total = seen["total"]
+    if covers_whole_file(seen):
+        stats.setdefault("opened", set()).add(path)
+
+
+def covers_whole_file(seen):
+    """Do the windows recorded for one path leave nothing unseen?"""
+    covered = seen.get("covered") or []
+    total = seen.get("total")
     if total is None:
         # Never partial and started at the top — the whole file in one read.
-        if any(start == 1 and end is None for start, end in seen["covered"]):
-            stats.setdefault("opened", set()).add(path)
-        return
+        return any(start == 1 and end is None for start, end in covered)
     reach = 0
     for start, end in sorted((s, e if e is not None else total)
-                             for s, e in seen["covered"]):
+                             for s, e in covered):
         if start > reach + 1:
-            return                      # a gap: something in the middle is unseen
+            return False                # a gap: something in the middle is unseen
         reach = max(reach, end)
-    if reach >= total:
-        stats.setdefault("opened", set()).add(path)
+    return reach >= total
 
 
 def _truncate(text, limit=MAX_TOOL_CHARS):
@@ -393,8 +399,8 @@ _DISPATCH = {"read_file": _read_file, "grep": _grep, "list_files": _list_files}
 #: run past MAX_TOOL_CHARS loses the footer entirely. That is exactly the large
 #: file where a partial read matters, and checking the footer alone would have
 #: called it complete. A clipped result is not a complete read either way.
-_PARTIAL_READ = re.compile(r"\[showing lines (\d+)-(\d+) of (\d+)\.[^\]]*\]\s*$")
-_CLIPPED_RESULT = re.compile(r"\[\.\.\. truncated: \d+ more chars\.[^\]]*\]\s*$")
+_PARTIAL_READ = re.compile(r"(?m)^\[showing lines (\d+)-(\d+) of (\d+)\.[^\]]*\]\s*$")
+_CLIPPED_RESULT = re.compile(r"(?m)^\[\.\.\. truncated: \d+ more chars\.[^\]]*\]\s*$")
 
 #: How `_call_tool` spells a failure. A tool result is a string either way, so
 #: anything reading results — `_record_opened`, for one — has to be able to

@@ -1388,14 +1388,30 @@ def _listed(findings):
 
 
 def _merge_opened(stats):
-    """Fold one pass's opened paths into the review's running set.
+    """Fold one pass's reading into the review's running record.
 
-    Every pass reads files and every pass keeps its own `stats`, so the set has
-    to be merged rather than replaced — the last pass winning would report a
-    file opened by an earlier one as never opened.
+    Every pass reads files and every pass keeps its own `stats`, so this
+    merges rather than replaces — the last pass winning would report a file
+    opened by an earlier one as never opened.
+
+    THE RANGES MERGE TOO, and that is the part that was missing: a file is
+    marked opened only once its windows cover it, and the windows can land in
+    DIFFERENT passes — the review pass reads lines 1-200, the revision reads
+    the rest. Merging only the finished `opened` sets left that file reported
+    as never opened, which is a false caveat. Found by this reviewer.
     """
-    _CURRENT["opened"] = set(_CURRENT.get("opened") or set()) | set(
-        (stats or {}).get("opened") or set())
+    stats = stats or {}
+    ranges = _CURRENT.setdefault("read_ranges", {})
+    for path, seen in (stats.get("_read_ranges") or {}).items():
+        into = ranges.setdefault(path, {"total": None, "covered": []})
+        into["covered"].extend(seen.get("covered") or [])
+        if seen.get("total") is not None:
+            into["total"] = max(into["total"] or 0, seen["total"])
+    opened = set(_CURRENT.get("opened") or set()) | set(stats.get("opened") or set())
+    for path, seen in ranges.items():
+        if agent.covers_whole_file(seen):
+            opened.add(path)
+    _CURRENT["opened"] = opened
 
 
 def _revise(findings, work, repo):
@@ -2604,6 +2620,7 @@ def main():
     _CURRENT["wire_fields"] = []
     _CURRENT["stats"] = {}
     _CURRENT["opened"] = set()
+    _CURRENT["read_ranges"] = {}
     meta = json.loads(gh(f"/repos/{ORG}/{repo}/pulls/{pr}"))
     if meta.get("draft"):
         print("draft — not reviewing")
