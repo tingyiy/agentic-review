@@ -118,7 +118,10 @@ class TestUnreviewedMeansUnopened:
         monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
 
         def review_findings(prompt, work, repo=""):
-            pr._CURRENT["stats"] = {"opened": set(opened)}
+            # What `_run_agent` accumulates across every pass — the initial
+            # one, the confirmation and the revision — which is what `main`
+            # reads. Per-pass `stats` is replaced each time and cannot carry it.
+            pr._CURRENT["opened"] = set(opened)
             return []
         monkeypatch.setattr(pr, "review_findings", review_findings)
         monkeypatch.setattr(pr, "post_review",
@@ -152,3 +155,63 @@ class TestUnreviewedMeansUnopened:
         posted = self._drive(monkeypatch, opened=set())
         assert "2 changed file(s) were NOT opened" in posted["body"]
         assert posted["event"] == "COMMENT"
+
+
+class TestTheSecondRoundOfFindings:
+    """Five from the review of this PR — four from the other reviewer, one
+    from this one, running hosted against its own change for the first time."""
+
+    def test_the_skeleton_read_is_contained(self, tmp_path):
+        """A changed path can be a symlink to somewhere else on the host. The
+        agent's own `Workspace.resolve` has refused that from the beginning and
+        this read was going around it."""
+        outside = tmp_path / "outside" / "secret.py"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("def leaked():\n    pass\n")
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "link.py").symlink_to(outside)
+        assert ctx.file_skeleton(str(work), "link.py") == ""
+        assert ctx.file_skeleton(str(work), "../outside/secret.py") == ""
+        assert ctx.file_skeleton(str(work), "/etc/hosts") == ""
+
+    def test_a_device_is_not_read(self, tmp_path):
+        """`/dev/zero` would have hung the review before the agent started."""
+        work = tmp_path / "w"
+        work.mkdir()
+        try:
+            (work / "z").symlink_to("/dev/zero")
+        except OSError:
+            pytest.skip("cannot symlink /dev/zero here")
+        assert ctx.file_skeleton(str(work), "z") == ""
+
+    def test_the_ellipsis_means_something_was_actually_cut(self, tmp_path):
+        """Exactly `MAX_SKELETON_DECLS` declarations is not a truncation."""
+        exact = "".join(f"def fn_{i}():\n    pass\n"
+                        for i in range(ctx.MAX_SKELETON_DECLS))
+        w = _repo(tmp_path, {"exact.py": exact})
+        assert "…" not in ctx.file_skeleton(w, "exact.py")
+        more = exact + "def one_more():\n    pass\n"
+        w2 = _repo(tmp_path / "b", {"more.py": more})
+        assert "…" in ctx.file_skeleton(w2, "more.py")
+
+    def test_a_failed_read_is_not_recorded_as_opened(self):
+        """Our own reviewer's finding: recording before the call meant a read
+        that failed — an escaping path, a missing file — still counted, so the
+        caveat would drop a file nobody had seen."""
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(stats, "read_file", '{"path": "src/a.py"}',
+                             "error: ValueError: path escapes the checkout")
+        assert stats.get("opened") is None
+        agent._record_opened(stats, "read_file", '{"path": "src/a.py"}',
+                             "1\tdef a():")
+        assert stats["opened"] == {"src/a.py"}
+
+    def test_the_path_spelling_is_normalised(self):
+        """`read_file("./src/big.py")` reads the same file as `src/big.py`, and
+        an unnormalised record made the caveat claim it was never opened."""
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(stats, "read_file", '{"path": "./src/big.py"}', "ok")
+        assert stats["opened"] == {"src/big.py"}

@@ -742,7 +742,14 @@ def _run_agent(prompt, cwd, timeout=AGENT_TIMEOUT, repo="", pr=""):
         # confirmation pass approves on the model's own account of what it
         # checked, and that account is worth exactly as much as the tool calls
         # behind it.
+        # ACCUMULATE the opened paths, replace everything else. `stats` is
+        # per-pass and the last pass wins, which is right for turn counts and
+        # wrong for this: a file read during the first pass or the revision
+        # would be reported as never opened because a later pass overwrote the
+        # record of it.
+        opened = set(_CURRENT.get("opened") or set()) | set(stats.get("opened") or set())
         _CURRENT["stats"] = dict(stats)
+        _CURRENT["opened"] = opened
         return text.strip()
     except agent.Timeout as e:
         _print_transcript(e.transcript)
@@ -2549,6 +2556,7 @@ def main():
     llm.reset_usage()
     _CURRENT["wire_fields"] = []
     _CURRENT["stats"] = {}
+    _CURRENT["opened"] = set()
     meta = json.loads(gh(f"/repos/{ORG}/{repo}/pulls/{pr}"))
     if meta.get("draft"):
         print("draft — not reviewing")
@@ -2636,8 +2644,10 @@ def main():
     # UNREVIEWED MEANS UNOPENED. The agent can read anything in the checkout,
     # so a file the diff had no room for is not unreviewed if the agent went
     # and read it — only the ones it never touched deserve the caveat.
-    opened = (_CURRENT.get("stats") or {}).get("opened") or set()
-    unopened = [p for p in (excluded or []) if p not in opened]
+    # Every pass, normalised the same way the loop records them.
+    opened = _CURRENT.get("opened") or set()
+    unopened = [p for p in (excluded or [])
+                if os.path.normpath(p) not in opened]
     if excluded and len(unopened) < len(excluded):
         print(f"  the agent opened {len(excluded) - len(unopened)} of "
               f"{len(excluded)} file(s) the diff could not show", flush=True)

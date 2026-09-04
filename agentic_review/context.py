@@ -519,12 +519,33 @@ MAX_SKELETON_DECLS = 12
 MAX_SKELETON_FILES = 25
 MAX_SKELETON_CHARS = 4_000
 
+#: How much of a file is read to find its declarations. A skeleton is a table
+#: of contents; nothing past this changes what it says, and an unbounded read
+#: of an unexpectedly enormous file is a cost with no benefit.
+MAX_SKELETON_READ = 400_000
+
 
 def file_skeleton(work, path, max_decls=MAX_SKELETON_DECLS):
-    """`path`'s length and its declarations, or "" if it cannot be read."""
+    """`path`'s length and its declarations, or "" if it cannot be read.
+
+    CONTAINED, like every other read of the checkout. A changed path can be a
+    symlink to somewhere else on the host — the agent's own `Workspace.resolve`
+    has refused that since the beginning, and this read was going around it.
+    Worse than reading the wrong file: `/dev/zero` would have hung the review
+    before the agent started. Regular files only, resolved, under `work`.
+    """
     try:
-        text = (pathlib.Path(work) / path).read_text(errors="replace")
-    except OSError:
+        root = os.path.realpath(work)
+        full = os.path.realpath(os.path.join(root, path))
+        if os.path.isabs(path) or (
+                full != root and os.path.commonpath([full, root]) != root):
+            return ""
+        if not os.path.isfile(full) or os.path.islink(
+                os.path.join(root, path)):
+            return ""
+        with open(full, "r", errors="replace") as fh:
+            text = fh.read(MAX_SKELETON_READ)
+    except (OSError, ValueError):
         return ""
     lines = text.splitlines()
     decls = []
@@ -535,11 +556,15 @@ def file_skeleton(work, path, max_decls=MAX_SKELETON_DECLS):
         if not m:
             continue
         name = next((g for g in m.groups() if g), None)
-        if name:
-            decls.append(f"{name}:{n}")
+        if not name:
+            continue
         if len(decls) >= max_decls:
+            # Only now is something ACTUALLY omitted. Appending the marker on
+            # reaching the cap claimed a truncation on a file with exactly
+            # `max_decls` declarations and nothing left to show.
             decls.append("…")
             break
+        decls.append(f"{name}:{n}")
     shape = ", ".join(decls) if decls else "no declarations found"
     return f"- `{path}` ({len(lines)} lines): {shape}"
 

@@ -130,20 +130,31 @@ class Workspace:
         return full
 
 
-def _record_opened(stats, name, raw):
-    """Note the path of a successful `read_file`, for the caller's caveat.
+def _record_opened(stats, name, raw, result):
+    """Note the path of a SUCCESSFUL `read_file`, for the caller's caveat.
 
-    Best-effort and silent: a malformed argument list is the tool's problem to
-    report, and bookkeeping must never raise inside the loop.
+    Two things this gets wrong if it is careless, and both were found by
+    review:
+
+      · recording before the call meant a read that FAILED — a path escaping
+        the checkout, a file that is not there — still counted as opened, so
+        the caveat would drop a file nobody had seen;
+      · recording the raw spelling meant `./src/big.py` never matched the
+        excluded `src/big.py`, and the caveat then said a file was not opened
+        when it had been.
+
+    Best-effort and silent otherwise: bookkeeping must never raise inside the
+    loop.
     """
-    if name != "read_file":
+    if name != "read_file" or str(result or "").startswith(TOOL_ERROR_PREFIX):
         return
     try:
         path = (json.loads(raw or "{}") or {}).get("path")
     except (ValueError, TypeError):
         return
-    if isinstance(path, str) and path:
-        stats.setdefault("opened", set()).add(path)
+    if not isinstance(path, str) or not path.strip():
+        return
+    stats.setdefault("opened", set()).add(os.path.normpath(path.strip()))
 
 
 def _truncate(text, limit=MAX_TOOL_CHARS):
@@ -327,6 +338,12 @@ TOOLS = [
 ]
 
 _DISPATCH = {"read_file": _read_file, "grep": _grep, "list_files": _list_files}
+
+
+#: How `_call_tool` spells a failure. A tool result is a string either way, so
+#: anything reading results — `_record_opened`, for one — has to be able to
+#: tell the two apart without re-deriving the wording.
+TOOL_ERROR_PREFIX = "error:"
 
 
 def _call_tool(ws, name, raw_args):
@@ -680,8 +697,8 @@ def run(system, user, root, model=None, deadline=900, max_turns=MAX_TURNS,
             # WHICH FILES IT ACTUALLY OPENED. A partial review that names every
             # unshown file as unreviewed is wrong about the ones the agent went
             # and read; only the untouched ones deserve the caveat.
-            _record_opened(stats, name, raw)
             result = _call_tool(ws, name, raw)
+            _record_opened(stats, name, raw, result)
             note(f"  {name}({_arg_summary(raw)}) -> {len(result)} chars "
                  f"in {time.monotonic() - t1:.2f}s")
             messages.append({"role": "tool",
