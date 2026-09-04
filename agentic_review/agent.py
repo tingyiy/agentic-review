@@ -156,10 +156,21 @@ def _record_opened(stats, name, raw, result):
     if _PARTIAL_READ.search(text) or _CLIPPED_RESULT.search(text):
         return
     try:
-        path = (json.loads(raw or "{}") or {}).get("path")
+        args = json.loads(raw or "{}") or {}
     except (ValueError, TypeError):
         return
+    path = args.get("path")
     if not isinstance(path, str) or not path.strip():
+        return
+    # AND IT HAS TO HAVE STARTED AT THE TOP. A window opened at `offset=800`
+    # of a 900-line file reaches the end, so it carries no partial-read
+    # footer — and lines 1-799 were never seen. Reaching EOF says where the
+    # read stopped, not where it began.
+    try:
+        offset = int(args.get("offset") or 1)
+    except (TypeError, ValueError):
+        return
+    if offset > 1:
         return
     stats.setdefault("opened", set()).add(os.path.normpath(path.strip()))
 

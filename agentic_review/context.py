@@ -584,7 +584,14 @@ def skeletons(work, paths):
     wanted = list(paths or [])
     rows, used, dropped = [], 0, max(0, len(wanted) - MAX_SKELETON_FILES)
     for path in wanted[:MAX_SKELETON_FILES]:
-        row = file_skeleton(work, path)
+        row = file_skeleton(work, path) or (
+            # NAMED EVEN WHEN ITS SHAPE CANNOT BE READ — deleted by this
+            # change, a symlink out of the checkout, a device. The old
+            # name-only caveat listed every excluded file; dropping the
+            # unreadable ones silently would make this a REGRESSION in
+            # coverage for exactly the files worth asking about.
+            f"- `{path}`: shape unavailable (deleted here, or not a readable "
+            f"file in the checkout)")
         if not row:
             continue
         if used + len(row) > MAX_SKELETON_CHARS:

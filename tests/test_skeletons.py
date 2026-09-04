@@ -68,9 +68,15 @@ class TestTheSection:
         assert "unreviewed if you do not look" in out
         assert "alpha:1" in out
 
-    def test_nothing_to_show_is_silent(self, tmp_path):
+    def test_no_files_at_all_is_silent(self, tmp_path):
         assert ctx.skeletons(str(tmp_path), []) == ""
-        assert ctx.skeletons(str(tmp_path), ["missing.py"]) == ""
+
+    def test_an_unreadable_file_is_still_NAMED(self, tmp_path):
+        """It is a changed file either way. Dropping it silently because its
+        shape cannot be read is a regression in coverage for exactly the files
+        worth asking about — deleted here, or a symlink out of the checkout."""
+        out = ctx.skeletons(str(tmp_path), ["missing.py"])
+        assert "missing.py" in out and "shape unavailable" in out
 
     def test_the_number_of_files_is_capped(self, tmp_path):
         files = {f"f{i}.py": "def a():\n    pass\n" for i in range(40)}
@@ -346,3 +352,29 @@ class TestTheThirdRoundFromOurOwnReviewer:
     def test_a_small_file_reports_its_real_length(self, tmp_path):
         w = _repo(tmp_path, {"s.py": "a = 1\nb = 2\n"})
         assert "(2 lines)" in ctx.file_skeleton(w, "s.py")
+
+
+class TestTheFourthRoundFromOurOwnReviewer:
+    def test_a_tail_only_read_is_not_a_full_read(self):
+        """`read_file("big.py", offset=800)` on a 900-line file reaches the
+        end, so it carries no partial-read footer — and lines 1-799 were never
+        seen. Reaching EOF says where the read stopped, not where it began."""
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(stats, "read_file",
+                             '{"path": "big.py", "offset": 800}', "800\tx")
+        assert stats.get("opened") is None
+
+    def test_a_read_from_the_top_still_counts(self):
+        from agentic_review import agent
+        for raw in ('{"path": "a.py"}', '{"path": "a.py", "offset": 1}'):
+            stats = {}
+            agent._record_opened(stats, "read_file", raw, "1\tx")
+            assert stats["opened"] == {"a.py"}, raw
+
+    def test_a_nonsense_offset_does_not_count(self):
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(stats, "read_file",
+                             '{"path": "a.py", "offset": "top"}', "1\tx")
+        assert stats.get("opened") is None
