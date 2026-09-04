@@ -20,7 +20,7 @@ def _wire(monkeypatch, refusal_body):
     def gh(path, method="GET", body=None, accept=""):
         if method == "POST" and path.endswith("/reviews"):
             ev = (body or {}).get("event")
-            posted.append(ev)
+            posted.append((ev, (body or {}).get("body", "")))
             if ev != "COMMENT":
                 raise urllib.error.HTTPError(
                     path, 422, "Unprocessable Entity", {},
@@ -44,7 +44,7 @@ class TestTheFindingsSurviveARefusedVerdict:
     def test_it_falls_back_to_a_comment(self, monkeypatch, refusal):
         posted = _wire(monkeypatch, refusal)
         out = pr.post_review("app", 1, "APPROVE", "body")
-        assert posted == ["APPROVE", "COMMENT"]
+        assert [ev for ev, _ in posted] == ["APPROVE", "COMMENT"]
         assert out.startswith("COMMENT (approve refused")
 
     def test_it_names_which_refusal_it_hit(self, monkeypatch):
@@ -85,3 +85,36 @@ class TestTheFindingsSurviveARefusedVerdict:
         monkeypatch.setattr(pr, "gh", gh)
         with pytest.raises(urllib.error.HTTPError):
             pr.post_review("app", 1, "COMMENT", "body")
+
+
+class TestTheFallbackCommentDoesNotClaimAnApproval:
+    """The approval body opens "**What this approval is.**". Falling back with
+    it unchanged posted a comment claiming an approval GitHub had just refused
+    to record — the false-clean verdict this module keeps being bitten by,
+    arriving through the one door nobody had checked. Copilot's finding."""
+
+    APPROVAL = ("### AI review — no findings\n\nReviewed for correctness.\n\n"
+                "**What this approval is.** An agent read the change at `abc1234`.")
+
+    def _fallback_body(self, monkeypatch):
+        posted = _wire(monkeypatch,
+                       '{"errors":["GitHub Apps are not permitted to approve"]}')
+        pr.post_review("app", 1, "APPROVE", self.APPROVAL)
+        return next(text for ev, text in posted if ev == "COMMENT")
+
+    def test_it_says_the_verdict_was_not_recorded(self, monkeypatch):
+        text = self._fallback_body(monkeypatch)
+        assert "would not record a `approve`" in text
+        assert "Nothing here has been recorded as an approval" in text
+
+    def test_the_approval_prose_is_taken_back_out(self, monkeypatch):
+        text = self._fallback_body(monkeypatch)
+        assert "**What this approval is.**" not in text
+        assert "### AI review — no findings\n" not in text
+
+    def test_the_findings_themselves_survive(self, monkeypatch):
+        posted = _wire(monkeypatch, '{"message":"Can not approve your own pull request"}')
+        pr.post_review("app", 1, "REQUEST_CHANGES",
+                       "### AI review\n\n🔴 **a real defect** — detail")
+        text = next(t for ev, t in posted if ev == "COMMENT")
+        assert "a real defect" in text and "would not record a `request changes`" in text

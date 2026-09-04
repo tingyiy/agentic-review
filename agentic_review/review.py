@@ -1970,6 +1970,27 @@ def _dismiss_stale_block(repo, pr, event, head_sha, truncated):
     return dismissed
 
 
+def _verdict_withheld(body, event):
+    """The same findings, with the verdict's own prose taken back out.
+
+    A refused APPROVE fell back to a comment carrying the APPROVAL body —
+    which opens "**What this approval is.**" — so the posted comment claimed
+    an approval GitHub had just declined to record. That is the false-clean
+    verdict this module keeps being bitten by, arriving through the one door
+    nobody had checked.
+    """
+    verdict = event.lower().replace("_", " ")
+    note = (f"> **⚠️ GitHub would not record a `{verdict}` from this account.** "
+            f"The findings below stand; the verdict does not. Nothing here has "
+            f"been recorded as an approval.\n\n")
+    cleaned = body.replace("### AI review — no findings\n",
+                           "### AI review — no findings, verdict not recorded\n")
+    cleaned = cleaned.replace(
+        "**What this approval is.**",
+        "**What this would have been.**")
+    return note + cleaned
+
+
 def post_review(repo, pr, event, body, head_sha="", truncated=False):
     """POST the review; return the event actually posted.
 
@@ -1985,9 +2006,9 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
     review that did not happen, and this module's whole discipline is that those
     must be loud.
     """
-    def post(ev):
+    def post(ev, text=None):
         gh(f"/repos/{ORG}/{repo}/pulls/{pr}/reviews", method="POST",
-           body={"event": ev, "body": body})
+           body={"event": ev, "body": text if text is not None else body})
 
     try:
         post(event)
@@ -2015,7 +2036,7 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
         # The verdict is refused, the findings are not. Post them as a comment
         # and SAY which verdict was withheld, so a clean review is not read as
         # an approval that never happened.
-        post("COMMENT")
+        post("COMMENT", _verdict_withheld(body, event))
         why = ("own PR" if SELF_REVIEW_REFUSAL in low
                else "this token may not set a verdict")
         return f"COMMENT ({event.lower().replace('_', ' ')} refused — {why})"
