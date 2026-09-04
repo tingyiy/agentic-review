@@ -2651,6 +2651,14 @@ def main():
     if excluded and len(unopened) < len(excluded):
         print(f"  the agent opened {len(excluded) - len(unopened)} of "
               f"{len(excluded)} file(s) the diff could not show", flush=True)
+    # AND THAT IS WHAT "TRUNCATED" MEANS FROM HERE ON. `_dismiss_stale_block`
+    # refuses to clear our own stale CHANGES_REQUESTED on a truncated review,
+    # because "no high found" may only mean "did not look there" — correct
+    # while an unshown file was also unread. caeli-marketing#233 sat blocked
+    # under a finding that no longer existed for exactly that reason. Once the
+    # agent has opened them, it did look, and the guard has nothing left to
+    # protect.
+    truncated = bool(unopened)
 
     head_sha = meta["head"]["sha"]
     wire_fields = _CURRENT.get("wire_fields") or []

@@ -215,3 +215,52 @@ class TestTheSecondRoundOfFindings:
         stats = {}
         agent._record_opened(stats, "read_file", '{"path": "./src/big.py"}', "ok")
         assert stats["opened"] == {"src/big.py"}
+
+
+class TestReadingThemAllUnblocksTheStaleBlock:
+    """caeli-marketing#233, live: a blocking finding was fixed, later reviews
+    found only nits, and the PR stayed at CHANGES_REQUESTED. The dismissal was
+    suppressed because the review was truncated — right while an unshown file
+    was also unread, and wrong once the agent has opened them."""
+
+    def _truncated_seen_by_post(self, monkeypatch, opened):
+        import json
+        from agentic_review import review as pr
+        seen = {}
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: ("--- a/x\n+++ b/x\n@@\n+x\n",
+                                        ["src/big.py"], 0))
+        monkeypatch.setattr(pr, "_already_reviewed", lambda *a, **k: "")
+        monkeypatch.setattr(pr, "checkout", lambda *a: None)
+        monkeypatch.setattr(pr, "build_context", lambda *a: "")
+        monkeypatch.setattr(pr.ctx, "skeletons", lambda *a: "")
+        monkeypatch.setattr(pr, "conversation", lambda *a: "")
+        monkeypatch.setattr(pr, "commit_messages", lambda *a: [])
+        monkeypatch.setattr(pr, "_revise", lambda f, w, r: (f, []))
+        monkeypatch.setattr(pr.checks, "run_all", lambda *a, **k: [])
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+
+        def review_findings(prompt, work, repo=""):
+            pr._CURRENT["opened"] = set(opened)
+            return []
+        monkeypatch.setattr(pr, "review_findings", review_findings)
+        monkeypatch.setattr(pr, "post_review",
+                            lambda repo, n, ev, body, head_sha="", truncated=False:
+                            seen.update(truncated=truncated) or ev)
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False,
+             "title": "SCRUM-1 x", "user": {"login": "someone"},
+             "head": {"sha": "a" * 40}}))
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "repo", "1"])
+        pr.main()
+        return seen["truncated"]
+
+    def test_an_unread_file_still_counts_as_truncated(self, monkeypatch):
+        """The guard keeps protecting the case it was written for."""
+        assert self._truncated_seen_by_post(monkeypatch, opened=set()) is True
+
+    def test_reading_it_makes_the_review_whole(self, monkeypatch):
+        """`_dismiss_stale_block` may then clear our own stale block, because
+        the agent did look where the old finding was."""
+        assert self._truncated_seen_by_post(
+            monkeypatch, opened={"src/big.py"}) is False
