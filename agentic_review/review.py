@@ -1619,7 +1619,7 @@ def _apply_withdrawals(body, event, findings, withdrawn):
 
 def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
                      head_sha="", repo="", wire_fields=(), diff="",
-                     excluded=()):
+                     excluded=(), saw_every_change=None):
     """The exact body and event this review will post.
 
     The WHOLE composition, not just the withdrawal branch, because the previous
@@ -1641,7 +1641,11 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     # one that covered all of them. The files are named in the body either way;
     # the verdict has to stop short too, or the name is a footnote on a green
     # tick.
-    if excluded and event == "APPROVE":
+    # `saw_every_change` is the honest question: an agent that OPENED an
+    # excluded file read it at head and still never saw the diff. Defaults to
+    # "whatever `excluded` says" so every existing caller keeps its behaviour.
+    if event == "APPROVE" and not (
+            saw_every_change if saw_every_change is not None else not excluded):
         event = "COMMENT"
     return _apply_withdrawals(body, event=event,
                               findings=findings, withdrawn=withdrawn)
@@ -2668,21 +2672,29 @@ def main():
     if excluded and len(unopened) < len(excluded):
         print(f"  the agent opened {len(excluded) - len(unopened)} of "
               f"{len(excluded)} file(s) the diff could not show", flush=True)
-    # AND THAT IS WHAT "TRUNCATED" MEANS FROM HERE ON. `_dismiss_stale_block`
-    # refuses to clear our own stale CHANGES_REQUESTED on a truncated review,
-    # because "no high found" may only mean "did not look there" — correct
-    # while an unshown file was also unread. caeli-marketing#233 sat blocked
-    # under a finding that no longer existed for exactly that reason. Once the
-    # agent has opened them, it did look, and the guard has nothing left to
-    # protect.
+    # THREE DIFFERENT QUESTIONS, AND THEY WERE RIDING ON ONE FLAG.
+    #
+    #   · the caveat asks "which files did nobody look at" — `unopened`;
+    #   · the stale-block dismissal asks "is the old finding still in the
+    #     code" — answerable from the file AT HEAD, so `unopened` again;
+    #   · the approval cap asks "did this review see every CHANGE" — and
+    #     `read_file` shows the head version, not the diff. An agent that
+    #     read an excluded file knows what the code says and not what the
+    #     change did to it, so this one stays keyed on `excluded`.
+    #
+    # Collapsing the third into the first would let a review approve changes
+    # it never saw, which is the exact overclaim the cap exists to prevent.
+    # Found by this reviewer, on this PR.
     truncated = bool(unopened)
+    saw_every_change = not excluded
 
     head_sha = meta["head"]["sha"]
     wire_fields = _CURRENT.get("wire_fields") or []
     body, event = _finalize_review(findings, withdrawn, truncated, skipped,
                                    head_sha=head_sha, repo=repo,
                                    wire_fields=wire_fields, diff=diff,
-                                   excluded=unopened)
+                                   excluded=unopened,
+                                   saw_every_change=saw_every_change)
 
     # LAST CHECK BEFORE POSTING. The agent poll aborts a review whose PR merges
     # mid-run, but the window between the agent finishing and the POST is not

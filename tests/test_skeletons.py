@@ -151,12 +151,18 @@ class TestUnreviewedMeansUnopened:
         posted = self._drive(monkeypatch, opened={"src/big.py", "src/other.py"})
         assert "Partial review" not in posted["body"]
 
-    def test_and_then_it_may_approve(self, monkeypatch):
-        """The partial-review cap exists because an approval that covered 10 of
-        25 files reads like one that covered all of them. If the agent opened
-        them, it did cover them."""
+    def test_but_it_still_may_not_approve(self, monkeypatch):
+        """READING A FILE IS NOT SEEING ITS CHANGE. `read_file` returns the
+        head version; the diff of an excluded file is never shown to the agent
+        at all. So the caveat can go — nobody's file went unlooked-at — while
+        the approval cap stays, because an approval would be claiming to have
+        reviewed changes this review never saw.
+
+        This test asserted the opposite until this reviewer pointed out the
+        overclaim on the PR that introduced it."""
         posted = self._drive(monkeypatch, opened={"src/big.py", "src/other.py"})
-        assert posted["event"] == "APPROVE"
+        assert "Partial review" not in posted["body"]
+        assert posted["event"] == "COMMENT"
 
     def test_reading_none_of_them_keeps_the_full_caveat(self, monkeypatch):
         posted = self._drive(monkeypatch, opened=set())
@@ -378,3 +384,33 @@ class TestTheFourthRoundFromOurOwnReviewer:
         agent._record_opened(stats, "read_file",
                              '{"path": "a.py", "offset": "top"}', "1\tx")
         assert stats.get("opened") is None
+
+
+class TestTheFifthRoundFromOurOwnReviewer:
+    def test_a_wholly_dropped_skeleton_list_still_names_the_count(self, tmp_path):
+        """When every row exceeds the character budget, `rows` is empty — and
+        returning "" put the excluded files nowhere at all: not in the diff,
+        not in the prompt."""
+        long_path = "src/" + "d" * 200
+        files = {f"{long_path}{i}.py": "def a():\n    pass\n" for i in range(20)}
+        w = _repo(tmp_path, files)
+        out = ctx.skeletons(w, sorted(files))
+        assert out != ""
+        assert "more not shown" in out
+
+    def test_the_approval_cap_is_keyed_on_the_diff_not_the_read(self):
+        """Three questions were riding on one flag. This is the one that must
+        stay keyed on what was SHOWN."""
+        from agentic_review import review as pr
+        _, event = pr._finalize_review([], [], excluded=[],
+                                       saw_every_change=False)
+        assert event == "COMMENT"
+        _, event = pr._finalize_review([], [], excluded=[],
+                                       saw_every_change=True)
+        assert event == "APPROVE"
+
+    def test_an_older_caller_keeps_its_behaviour(self):
+        """`saw_every_change` defaults to what `excluded` says."""
+        from agentic_review import review as pr
+        assert pr._finalize_review([], [], excluded=["a.py"])[1] == "COMMENT"
+        assert pr._finalize_review([], [], excluded=[])[1] == "APPROVE"

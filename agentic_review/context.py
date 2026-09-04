@@ -599,7 +599,7 @@ def skeletons(work, paths):
             continue
         rows.append(row)
         used += len(row)
-    if not rows:
+    if not rows and not dropped:
         return ""
     if dropped:
         # SAY WHAT WAS CUT, like every other truncation here. A list that reads
