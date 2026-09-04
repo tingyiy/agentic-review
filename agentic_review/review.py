@@ -482,7 +482,7 @@ def commit_messages(repo, pr):
         return []
 
 
-def build_context(repo, pr, meta, work, changed):
+def build_context(repo, pr, meta, work, changed, diff=""):
     """Everything the reviewer is TOLD, as opposed to what it can go and find.
 
     The order is deliberate and it is the order a human would read in: the
@@ -527,7 +527,12 @@ def build_context(repo, pr, meta, work, changed):
     if ci_section:
         print("  ci: " + ("pending" if "still running" in ci_section else "results")
               + " on the head commit", flush=True)
-    return ctx.build(work, changed, ticket_section, linked_section) + ci_section
+    xref_section = ctx.cross_references(work, diff, changed)
+    if xref_section:
+        print(f"  cross-refs: {xref_section.count(chr(10) + '- ')} name(s) also "
+              "used outside the diff", flush=True)
+    return (ctx.build(work, changed, ticket_section, linked_section, xref_section)
+            + ci_section)
 
 
 def run_agent(prompt, cwd, timeout=None):
@@ -2570,7 +2575,8 @@ def main():
         # PR look freshly changed the first time this shipped.
         shown = ctx.expand_hunks(diff, work, max_chars=int(MAX_DIFF * 1.6))
         prompt = PROMPT.format(repo=repo, path=work, diff=shown, caveats=caveats,
-                               context=build_context(repo, pr, meta, work, changed),
+                               context=build_context(repo, pr, meta, work, changed,
+                                                     diff),
                                prior=conversation(repo, pr))
         findings = review_findings(prompt, work, repo)
         # ONE pass that drops, corrects and adds — against the conversation that

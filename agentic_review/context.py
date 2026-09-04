@@ -244,11 +244,142 @@ def linked_prs(refs, fetch, skip=(), limit=MAX_LINKED_PRS):
             + "\n\n".join(blocks) + "\n")
 
 
-def build(work, changed_paths, tracker_section="", linked_section=""):
+def build(work, changed_paths, tracker_section="", linked_section="",
+          xref_section=""):
     """Assemble the whole context block, in the order a human would read it."""
     parts = [convention_docs(work, changed_paths), tracker_section,
-             linked_section, repo_map(work)]
+             linked_section, xref_section, repo_map(work)]
     return "".join(p for p in parts if p)
+
+
+# --------------------------------------------------------------------------
+# Cross-references: where else the repository mentions the names this diff uses
+# --------------------------------------------------------------------------
+# Measured against a second reviewer on six pull requests (2026-09-03). Of the
+# defects only it found, three were the same shape: a name in the diff that has
+# ANOTHER definition or ANOTHER consumer somewhere the diff does not touch.
+#
+#   · a CSS class the diff sets was also declared in the stylesheet, and the
+#     two rules fought;
+#   · a payload key the diff produced was ignored by the handler that reads it;
+#   · a storage key the diff wrote was already written by a second component,
+#     so upgraded installs ended up with two values.
+#
+# Each needed one grep. The agent HAS grep and did not think to run it, so this
+# runs it in advance: for every identifier the added lines introduce or handle,
+# the files outside the diff that also mention it. Not the contents — the
+# POINTER, which is what turns "I did not think to look" into "there is a
+# second mention, go and read it".
+#
+# Deliberately NOT a call graph or a class diagram. Both were measured on this
+# codebase and rejected: PyCG found no edge for the case that mattered (tests
+# reach routes by URL string), and a class diagram answers questions the agent
+# already answers with one grep. The misses were never about class structure.
+
+#: How many names are worth chasing, and how many mentions each. Both small:
+#: this is a pointer list, and a long one is skimmed rather than read.
+MAX_XREF_NAMES = 12
+MAX_XREF_FILES = 4
+MAX_XREF_CHARS = 2_400
+
+#: Names that match half the repository. A cross-reference for `id` or `data`
+#: is noise, and noise here is expensive: it pushes the real pointer off the
+#: bottom of a capped list.
+_XREF_STOP = {
+    "id", "ids", "data", "type", "name", "key", "keys", "value", "values",
+    "self", "this", "true", "false", "null", "none", "error", "result",
+    "response", "request", "config", "options", "props", "state", "item",
+    "items", "list", "index", "test", "tests", "main", "init", "get", "set",
+    "url", "path", "file", "line", "text", "class", "style", "styles",
+}
+
+#: What counts as a name worth chasing, in the diff's ADDED lines.
+_XREF_PATTERNS = (
+    # A CSS class the change declares or applies: `.prog--cpsa {`, `class="x"`,
+    # `classList.add('x')`, `className={'x'}`.
+    re.compile(r"^\s*\.([a-zA-Z][\w-]{2,})\s*[,{]"),
+    re.compile(r"""class(?:Name)?\s*=\s*["'{]([^"'}]{3,80})["'}]"""),
+    re.compile(r"""classList\.(?:add|remove|toggle)\(\s*["']([\w-]{3,})["']"""),
+    # A key or status value the change reads or writes, as a quoted literal
+    # used with a subscript or a comparison.
+    re.compile(r"""\[\s*["']([a-z][\w.-]{2,})["']\s*\]"""),
+    re.compile(r"""(?:==|===|!=|!==|\bis\b|\bin\b)\s*["']([a-z][\w.-]{2,})["']"""),
+    re.compile(r"""["']([a-z][a-z0-9]*(?:[_-][a-z0-9]+){1,})["']"""),
+    # A definition the change introduces.
+    re.compile(r"^\s*(?:async\s+)?def\s+(\w{3,})"),
+    re.compile(r"^\s*class\s+(\w{3,})"),
+    re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w{3,})"),
+    re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+(\w{3,})\s*="),
+)
+
+
+def xref_names(diff):
+    """Identifiers worth chasing, from the diff's ADDED lines, in order.
+
+    Added lines only: a name the change merely walks past is not a name the
+    change is making a claim about, and every entry here costs a grep.
+    """
+    seen, out = set(), []
+    for line in (diff or "").splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        body = line[1:]
+        for pattern in _XREF_PATTERNS:
+            for raw in pattern.findall(body):
+                for name in str(raw).split():
+                    name = name.strip(".:,;")
+                    if (len(name) < 3 or name.lower() in _XREF_STOP
+                            or name in seen or not re.fullmatch(r"[\w.-]+", name)):
+                        continue
+                    seen.add(name)
+                    out.append(name)
+    return out
+
+
+def cross_references(work, diff, changed_paths, run=None):
+    """Where else the repository mentions the names this change introduces.
+
+    Never raises: every grep is best-effort, and a review without this section
+    is the review we shipped for weeks.
+    """
+    names = xref_names(diff)
+    if not names:
+        return ""
+    changed = set(changed_paths or ())
+    runner = run or _git_grep_files
+    rows, used = [], 0
+    for name in names:
+        if len(rows) >= MAX_XREF_NAMES or used >= MAX_XREF_CHARS:
+            break
+        try:
+            hits = runner(work, name)
+        except Exception:  # noqa: BLE001 — a pointer list is never worth a review
+            continue
+        # Only mentions the diff does NOT already show. A name that lives
+        # entirely inside the change is not a second consumer.
+        elsewhere = [h for h in hits if h not in changed][:MAX_XREF_FILES]
+        if not elsewhere:
+            continue
+        row = f"- `{name}` also in: " + ", ".join(elsewhere)
+        rows.append(row)
+        used += len(row)
+    if not rows:
+        return ""
+    return ("\nWHERE ELSE THESE NAMES APPEAR. Each name below is introduced or\n"
+            "handled by this change AND occurs in files the change does not\n"
+            "touch. That second occurrence is the question: is it another\n"
+            "definition that now conflicts, another consumer that was not\n"
+            "updated, or simply an unrelated use? Open the ones that matter —\n"
+            "this list is a pointer, not an answer, and an unrelated match is\n"
+            "the common case.\n\n" + "\n".join(rows) + "\n")
+
+
+def _git_grep_files(work, name):
+    """Files mentioning `name`, as a fixed string. Repository-tracked only."""
+    p = subprocess.run(
+        ["git", "-C", work, "grep", "-l", "--fixed-strings", "--", name],
+        capture_output=True, text=True, timeout=20)
+    return [l.strip() for l in (p.stdout or "").splitlines() if l.strip()]
 
 
 # --------------------------------------------------------------------------
