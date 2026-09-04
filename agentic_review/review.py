@@ -1771,7 +1771,27 @@ def review_event(findings):
 
 #: What GitHub says when it refuses a verdict on your own PR — "Can not approve
 #: your own pull request" / "Can not request changes on your own pull request".
+#: The refusals GitHub answers a verdict with, and which are ABOUT THE POSTER
+#: rather than about the review. Both end the same way — the findings are worth
+#: posting, the verdict is not available — so both fall back to a comment.
+#:
+#:   · your own pull request — a human token reviewing its author's PR;
+#:   · a GitHub App's token cannot APPROVE at all, which is what the workflow's
+#:     own GITHUB_TOKEN is. Measured on this repository's first hosted
+#:     self-review: a clean diff, 0 findings, and the whole review lost to a
+#:     422 because approving was the one thing it could not do.
 SELF_REVIEW_REFUSAL = "your own pull request"
+#: Each names the POSTER as the reason. "Review cannot be submitted" was here
+#: too and came out: it is GitHub's generic wrapper, and matching it would send
+#: any 422 carrying that phrase — a stale head, a body over the limit — down
+#: the same path, which is precisely the silent downgrade this guard exists to
+#: prevent. The App refusal is already named by its nested reason.
+VERDICT_REFUSALS = (
+    SELF_REVIEW_REFUSAL,
+    "not permitted to approve",
+    "cannot approve",
+    "can not approve",
+)
 
 
 #: What the dismissal says. It is a claim about OUR earlier objection, not about
@@ -1950,6 +1970,39 @@ def _dismiss_stale_block(repo, pr, event, head_sha, truncated):
     return dismissed
 
 
+def _verdict_withheld(body, event):
+    """The same findings, with the verdict's own prose taken back out.
+
+    A refused APPROVE fell back to a comment carrying the APPROVAL body —
+    which opens "**What this approval is.**" — so the posted comment claimed
+    an approval GitHub had just declined to record. That is the false-clean
+    verdict this module keeps being bitten by, arriving through the one door
+    nobody had checked.
+    """
+    verdict = event.lower().replace("_", " ")
+    note = (f"> **⚠️ GitHub would not record a `{verdict}` from this account.** "
+            f"The findings below stand; the verdict does not. Nothing here has "
+            f"been recorded as an approval.\n\n")
+    cleaned = body.replace("### AI review — no findings\n",
+                           "### AI review — no findings, verdict not recorded\n")
+    cleaned = cleaned.replace(
+        "**What this approval is.**",
+        "**What this would have been.**")
+    return note + cleaned
+
+
+def _write_step_summary(repo, pr, event, body):
+    """The run page's copy of what was POSTED. Never raises."""
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary:
+        return
+    try:
+        with open(summary, "a") as fh:
+            fh.write(f"## {event} — {repo}#{pr}\n\n{body}\n")
+    except OSError as e:
+        print(f"  (could not write step summary: {e})", flush=True)
+
+
 def post_review(repo, pr, event, body, head_sha="", truncated=False):
     """POST the review; return the event actually posted.
 
@@ -1965,9 +2018,9 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
     review that did not happen, and this module's whole discipline is that those
     must be loud.
     """
-    def post(ev):
+    def post(ev, text=None):
         gh(f"/repos/{ORG}/{repo}/pulls/{pr}/reviews", method="POST",
-           body={"event": ev, "body": body})
+           body={"event": ev, "body": text if text is not None else body})
 
     try:
         post(event)
@@ -1989,12 +2042,22 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
             detail = e.read().decode("utf-8", "replace")
         except Exception:  # noqa: BLE001 — the body is best-effort context
             detail = ""
-        if SELF_REVIEW_REFUSAL not in detail.lower():
+        low = detail.lower()
+        if not any(r in low for r in VERDICT_REFUSALS):
             raise
-        # GitHub refuses BOTH approval and changes-requested on your own PR.
-        # The findings are still worth posting, just without the verdict.
-        post("COMMENT")
-        return f"COMMENT ({event.lower().replace('_', ' ')} refused on own PR)"
+        # The verdict is refused, the findings are not. Post them as a comment
+        # and SAY which verdict was withheld, so a clean review is not read as
+        # an approval that never happened.
+        post("COMMENT", _verdict_withheld(body, event))
+        # THE SAME RECONCILIATION A REAL COMMENT GETS. The fallback returned
+        # early and skipped it, so a clean review on a newer head left our own
+        # older CHANGES_REQUESTED standing — an approval would have superseded
+        # it, and this comment is what that approval turned into.
+        for rid in _withdraw_stale_approval(repo, pr, head_sha):
+            print(f"  withdrew our own now-stale APPROVE ({rid})")
+        why = ("own PR" if SELF_REVIEW_REFUSAL in low
+               else "this token may not set a verdict")
+        return f"COMMENT ({event.lower().replace('_', ' ')} refused — {why})"
 
 
 #: A markdown link or image, and a bare autolink. `detail` and `title` are
@@ -2658,20 +2721,21 @@ def main():
     # opening the PR, and a review that was posted and then dismissed still has
     # a record. Best-effort: there is no summary file outside Actions, and
     # failing to write a nicety must never cost the review.
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        try:
-            with open(summary, "a") as fh:
-                fh.write(f"## {event} — {repo}#{pr}\n\n{body}\n")
-        except OSError as e:
-            print(f"  (could not write step summary: {e})", flush=True)
-
     if os.environ.get("DRY"):
+        _write_step_summary(repo, pr, event, body)
         print(f"--- would post {event} ---\n{body}")
         return
 
-    event = post_review(repo, pr, event, body,
-                        head_sha=head_sha, truncated=truncated)
+    # AFTER the POST, because the POST can change both. A refused approval
+    # becomes a comment carrying different text, and writing the summary first
+    # left the run page reporting a clean approval GitHub had declined — the
+    # very claim the fallback exists to retract.
+    posted = post_review(repo, pr, event, body,
+                         head_sha=head_sha, truncated=truncated)
+    _write_step_summary(repo, pr, posted,
+                        _verdict_withheld(body, event)
+                        if posted.startswith("COMMENT (") else body)
+    event = posted
     print(f"{event}: {len(findings)} finding(s)")
     status.done(repo, head_sha, event,
                 f"{len(findings)} finding(s): {severity_breakdown(findings)}")
