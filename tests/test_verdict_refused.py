@@ -107,7 +107,10 @@ class TestTheFallbackCommentDoesNotClaimAnApproval:
 
     def test_it_says_the_verdict_was_not_recorded(self, monkeypatch):
         text = self._fallback_body(monkeypatch)
-        assert "would not record a `approve`" in text
+        # "an", because the verdict is interpolated and the article has to
+        # follow it — the banner read "a `approve`" on this repo's own PRs,
+        # which is the wording every self-review shows.
+        assert "would not record an `approve`" in text
         assert "Nothing here has been recorded as an approval" in text
 
     def test_the_approval_prose_is_taken_back_out(self, monkeypatch):
@@ -121,6 +124,10 @@ class TestTheFallbackCommentDoesNotClaimAnApproval:
                        "### AI review\n\n🔴 **a real defect** — detail")
         text = next(t for ev, t in posted if ev == "COMMENT")
         assert "a real defect" in text and "would not record a `request changes`" in text
+        # And not "recorded as an approval": under a refused REQUEST_CHANGES
+        # what the reader needs is that nothing is blocking them.
+        assert "Nothing here blocks the merge." in text
+        assert "recorded as an approval" not in text
 
 
 class TestTheFallbackReconcilesLikeARealComment:
