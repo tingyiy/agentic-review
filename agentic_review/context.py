@@ -19,6 +19,7 @@ that it has seen everything.
 """
 import json
 import os
+import pathlib
 import re
 import subprocess
 
@@ -484,6 +485,86 @@ def cross_references(work, diff, changed_paths, run=None, also_changed=()):
             "updated, or simply an unrelated use? Open the ones that matter —\n"
             "this list is a pointer, not an answer, and an unrelated match is\n"
             "the common case.\n\n" + "\n".join(rows) + "\n")
+
+
+# --------------------------------------------------------------------------
+# Skeletons: the shape of a file the diff had no room to show
+# --------------------------------------------------------------------------
+# A PR bigger than the diff budget used to lose its tail entirely — the review
+# said "these files were NOT reviewed" and stopped. But the agent is standing
+# in a checkout with `read_file` and `grep`, so an unshown file is not
+# unreachable, only unadvertised. What it lacked was a reason to look.
+#
+# So each unshown file contributes its SHAPE instead of its diff: how long it
+# is, and the declarations in it with their line numbers. A few hundred
+# characters against the five to eleven thousand the diff would have cost, and
+# the agent can pull any region it decides matters.
+
+#: Lines that declare something worth naming, across the languages these
+#: repositories actually use. Deliberately shallow: this is a table of
+#: contents, not a parse, and a wrong entry costs one wasted read.
+_DECL = re.compile(
+    r"^\s*(?:export\s+(?:default\s+)?)?"
+    r"(?:async\s+)?"
+    r"(?:"
+    r"(?:def|class)\s+(\w+)"                       # python
+    r"|(?:function)\s+(\w+)"                       # js/ts
+    r"|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>"
+    r"|(?:interface|type|enum)\s+(\w+)"            # ts
+    r"|(?:func)\s+(?:\([^)]*\)\s*)?(\w+)"          # go
+    r")")
+
+#: Per file, and overall. A skeleton that runs long stops being a map.
+MAX_SKELETON_DECLS = 12
+MAX_SKELETON_FILES = 25
+MAX_SKELETON_CHARS = 4_000
+
+
+def file_skeleton(work, path, max_decls=MAX_SKELETON_DECLS):
+    """`path`'s length and its declarations, or "" if it cannot be read."""
+    try:
+        text = (pathlib.Path(work) / path).read_text(errors="replace")
+    except OSError:
+        return ""
+    lines = text.splitlines()
+    decls = []
+    for n, line in enumerate(lines, 1):
+        if len(line) > 300:
+            continue                      # minified or generated
+        m = _DECL.match(line)
+        if not m:
+            continue
+        name = next((g for g in m.groups() if g), None)
+        if name:
+            decls.append(f"{name}:{n}")
+        if len(decls) >= max_decls:
+            decls.append("…")
+            break
+    shape = ", ".join(decls) if decls else "no declarations found"
+    return f"- `{path}` ({len(lines)} lines): {shape}"
+
+
+def skeletons(work, paths):
+    """The shape of every file the diff had no room for.
+
+    Never raises, and never claims to be complete: a file that cannot be read
+    is simply absent, which is the same outcome as before this existed.
+    """
+    rows, used = [], 0
+    for path in list(paths or [])[:MAX_SKELETON_FILES]:
+        row = file_skeleton(work, path)
+        if not row or used + len(row) > MAX_SKELETON_CHARS:
+            continue
+        rows.append(row)
+        used += len(row)
+    if not rows:
+        return ""
+    return ("\nFILES THIS DIFF HAD NO ROOM FOR. They are in the checkout and\n"
+            "`read_file` works on them — what follows is their shape, so you can\n"
+            "decide which are worth opening. A change is not unreviewed because\n"
+            "it did not fit; it is unreviewed if you do not look. Open the ones\n"
+            "the change depends on, and say in your findings if you did not.\n\n"
+            + "\n".join(rows) + "\n")
 
 
 def _git_grep_files(work, name):

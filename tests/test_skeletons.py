@@ -1,0 +1,154 @@
+"""The shape of a file the diff had no room to show.
+
+caeli-marketing#233: an 87k diff against a 60k budget, and four test files
+dropped with "were NOT reviewed". They were 200-line files in a checkout the
+agent was standing in, with `read_file` and `grep` in its hands. What it
+lacked was a reason to look — a name in a list is not one.
+"""
+import pathlib
+
+import pytest
+
+from agentic_review import context as ctx
+
+
+def _repo(tmp_path, files):
+    for path, body in files.items():
+        p = tmp_path / path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    return str(tmp_path)
+
+
+class TestWhatASkeletonSays:
+    def test_the_length_and_the_declarations_with_line_numbers(self, tmp_path):
+        w = _repo(tmp_path, {"src/a.py": "import os\n\n\ndef alpha():\n    pass\n\n\nclass Beta:\n    pass\n"})
+        row = ctx.file_skeleton(w, "src/a.py")
+        assert "`src/a.py` (9 lines)" in row
+        assert "alpha:4" in row and "Beta:8" in row
+
+    @pytest.mark.parametrize("body,expected", [
+        ("export function handleClick() {}\n", "handleClick:1"),
+        ("const useThing = (a) => {\n}\n", "useThing:1"),
+        ("export const useOther = async () => {}\n", "useOther:1"),
+        ("interface WirePayload {\n}\n", "WirePayload:1"),
+        ("type Verdict = 'a'\n", "Verdict:1"),
+        ("func ServeHTTP(w http.ResponseWriter) {\n}\n", "ServeHTTP:1"),
+        ("async def fetch_it():\n    pass\n", "fetch_it:1"),
+    ])
+    def test_the_languages_these_repositories_actually_use(self, tmp_path, body, expected):
+        w = _repo(tmp_path, {"f.ts": body})
+        assert expected in ctx.file_skeleton(w, "f.ts")
+
+    def test_a_file_with_nothing_to_declare_still_reports_its_length(self, tmp_path):
+        w = _repo(tmp_path, {"data.json": '{\n  "a": 1\n}\n'})
+        row = ctx.file_skeleton(w, "data.json")
+        assert "3 lines" in row and "no declarations found" in row
+
+    def test_minified_lines_are_not_mined_for_declarations(self, tmp_path):
+        w = _repo(tmp_path, {"b.js": "function a(){}" + "x" * 400 + "\n"})
+        assert "no declarations found" in ctx.file_skeleton(w, "b.js")
+
+    def test_a_long_file_is_summarised_not_transcribed(self, tmp_path):
+        body = "".join(f"def fn_{i}():\n    pass\n" for i in range(50))
+        w = _repo(tmp_path, {"many.py": body})
+        row = ctx.file_skeleton(w, "many.py")
+        assert row.count(":") <= ctx.MAX_SKELETON_DECLS + 2
+        assert "…" in row
+
+    def test_an_unreadable_file_is_absent_rather_than_guessed_at(self, tmp_path):
+        assert ctx.file_skeleton(str(tmp_path), "gone.py") == ""
+
+
+class TestTheSection:
+    def test_it_tells_the_model_the_files_are_readable(self, tmp_path):
+        w = _repo(tmp_path, {"src/a.py": "def alpha():\n    pass\n"})
+        out = ctx.skeletons(w, ["src/a.py"])
+        assert "read_file` works on them" in out
+        assert "unreviewed if you do not look" in out
+        assert "alpha:1" in out
+
+    def test_nothing_to_show_is_silent(self, tmp_path):
+        assert ctx.skeletons(str(tmp_path), []) == ""
+        assert ctx.skeletons(str(tmp_path), ["missing.py"]) == ""
+
+    def test_the_number_of_files_is_capped(self, tmp_path):
+        files = {f"f{i}.py": "def a():\n    pass\n" for i in range(40)}
+        w = _repo(tmp_path, files)
+        out = ctx.skeletons(w, sorted(files))
+        assert out.count("\n- ") <= ctx.MAX_SKELETON_FILES
+
+    def test_the_whole_section_is_bounded(self, tmp_path):
+        files = {f"dir{i}/{'n' * 80}.py": "def a():\n    pass\n" for i in range(30)}
+        w = _repo(tmp_path, files)
+        out = ctx.skeletons(w, sorted(files))
+        assert len(out) < ctx.MAX_SKELETON_CHARS + 600
+
+    def test_it_costs_a_fraction_of_the_diff_it_replaces(self, tmp_path):
+        """The trade this exists to make: ~11k characters of diff became a few
+        hundred of shape, and the file stayed reachable."""
+        body = "".join(f"export function fn{i}(a, b) {{\n  return a + b;\n}}\n"
+                       for i in range(120))
+        w = _repo(tmp_path, {"big.ts": body})
+        out = ctx.skeletons(w, ["big.ts"])
+        assert len(out) < len(body) / 4
+
+
+class TestUnreviewedMeansUnopened:
+    """A file the diff had no room for is not unreviewed if the agent went and
+    read it. Blanket-disclaiming four files the model may well have opened is
+    a false caveat, and a false caveat is worse than none: it teaches the
+    reader to skip the box."""
+
+    def _drive(self, monkeypatch, opened):
+        import json
+        from agentic_review import review as pr
+        posted = {}
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: ("--- a/x\n+++ b/x\n@@\n+x\n",
+                                        ["src/big.py", "src/other.py"], 0))
+        monkeypatch.setattr(pr, "_already_reviewed", lambda *a, **k: "")
+        monkeypatch.setattr(pr, "checkout", lambda *a: None)
+        monkeypatch.setattr(pr, "build_context", lambda *a: "")
+        monkeypatch.setattr(pr.ctx, "skeletons", lambda *a: "")
+        monkeypatch.setattr(pr, "conversation", lambda *a: "")
+        monkeypatch.setattr(pr, "commit_messages", lambda *a: [])
+        monkeypatch.setattr(pr, "_revise", lambda f, w, r: (f, []))
+        monkeypatch.setattr(pr.checks, "run_all", lambda *a, **k: [])
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+
+        def review_findings(prompt, work, repo=""):
+            pr._CURRENT["stats"] = {"opened": set(opened)}
+            return []
+        monkeypatch.setattr(pr, "review_findings", review_findings)
+        monkeypatch.setattr(pr, "post_review",
+                            lambda repo, n, ev, body, **k: posted.update(
+                                event=ev, body=body) or ev)
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False,
+             "title": "SCRUM-1 x", "user": {"login": "someone"},
+             "head": {"sha": "a" * 40}}))
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "repo", "1"])
+        pr.main()
+        return posted
+
+    def test_a_file_the_agent_read_is_not_called_unreviewed(self, monkeypatch):
+        posted = self._drive(monkeypatch, opened={"src/big.py"})
+        assert "src/other.py" in posted["body"]
+        assert "src/big.py" not in posted["body"]
+
+    def test_reading_all_of_them_removes_the_caveat_entirely(self, monkeypatch):
+        posted = self._drive(monkeypatch, opened={"src/big.py", "src/other.py"})
+        assert "Partial review" not in posted["body"]
+
+    def test_and_then_it_may_approve(self, monkeypatch):
+        """The partial-review cap exists because an approval that covered 10 of
+        25 files reads like one that covered all of them. If the agent opened
+        them, it did cover them."""
+        posted = self._drive(monkeypatch, opened={"src/big.py", "src/other.py"})
+        assert posted["event"] == "APPROVE"
+
+    def test_reading_none_of_them_keeps_the_full_caveat(self, monkeypatch):
+        posted = self._drive(monkeypatch, opened=set())
+        assert "2 changed file(s) were NOT opened" in posted["body"]
+        assert posted["event"] == "COMMENT"

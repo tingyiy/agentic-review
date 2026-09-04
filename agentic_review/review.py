@@ -2251,7 +2251,8 @@ def _unreviewed_files_note(excluded):
     shown = [_code_span(p) for p in excluded[:30]]
     more = f", and {len(excluded) - 30} more" if len(excluded) > 30 else ""
     return (f"> **⚠️ Partial review — {len(excluded)} changed file(s) were NOT "
-            f"reviewed** (over the diff budget): {', '.join(shown)}{more}.\n"
+            f"opened** (they did not fit the diff budget and the agent did not "
+            f"read them): {', '.join(shown)}{more}.\n"
             f"> This is not an approval of those files. Split the PR, or "
             f"request a follow-up review naming them.\n\n")
 
@@ -2605,12 +2606,10 @@ def main():
         print(f"  agent exploring the checkout (timeout {AGENT_TIMEOUT}s)…", flush=True)
         caveats = ""
         if excluded:
-            # BY NAME. "The diff was truncated" tells the model nothing it can
-            # act on; a list of paths is something it can open.
-            caveats += ("\n[NOT INCLUDED — these changed files did not fit the "
-                        f"diff budget. They ARE in the checkout — read_file works on them; "
-                        "open any the change depends on: "
-                        + ", ".join(excluded) + "]\n")
+            # BY SHAPE, not just by name. A list of paths was something the
+            # model could open and mostly did not; how long each file is and
+            # what it declares is something it can DECIDE on.
+            caveats += ctx.skeletons(work, excluded)
         if skipped:
             caveats += f"[{skipped} generated/binary files omitted]\n"
         changed = _diff_paths(diff)
@@ -2634,12 +2633,21 @@ def main():
                                    commits=commit_messages(repo, pr),
                                    pr_body=meta.get("body") or "", diff=diff)
 
+    # UNREVIEWED MEANS UNOPENED. The agent can read anything in the checkout,
+    # so a file the diff had no room for is not unreviewed if the agent went
+    # and read it — only the ones it never touched deserve the caveat.
+    opened = (_CURRENT.get("stats") or {}).get("opened") or set()
+    unopened = [p for p in (excluded or []) if p not in opened]
+    if excluded and len(unopened) < len(excluded):
+        print(f"  the agent opened {len(excluded) - len(unopened)} of "
+              f"{len(excluded)} file(s) the diff could not show", flush=True)
+
     head_sha = meta["head"]["sha"]
     wire_fields = _CURRENT.get("wire_fields") or []
     body, event = _finalize_review(findings, withdrawn, truncated, skipped,
                                    head_sha=head_sha, repo=repo,
                                    wire_fields=wire_fields, diff=diff,
-                                   excluded=excluded)
+                                   excluded=unopened)
 
     # LAST CHECK BEFORE POSTING. The agent poll aborts a review whose PR merges
     # mid-run, but the window between the agent finishing and the POST is not

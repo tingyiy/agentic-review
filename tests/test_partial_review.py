@@ -10,6 +10,7 @@ model, the caveat said "the diff was truncated" and named nothing, and the last
 file that fit arrived as half a hunk.
 """
 import json
+import pathlib
 
 import pytest
 
@@ -79,17 +80,17 @@ class TestTheReaderIsTold:
 
     def test_the_note_names_the_files_and_comes_first(self, pr):
         body = pr.render(list(self.FINDING), True, 0, excluded=["src/b.py", "src/c.py"])
-        assert "NOT reviewed" in body
+        assert "NOT opened" in body
         assert "src/b.py" in body and "src/c.py" in body
-        assert body.index("NOT reviewed") < body.index("**t**")
+        assert body.index("NOT opened") < body.index("**t**")
 
     def test_an_approval_body_carries_the_note_too(self, pr):
         body = pr.approval_body(head_sha="a" * 40, repo="r", excluded=["src/b.py"])
-        assert "NOT reviewed" in body and "src/b.py" in body
+        assert "NOT opened" in body and "src/b.py" in body
 
     def test_no_exclusions_means_no_note(self, pr):
-        assert "NOT reviewed" not in pr.render(list(self.FINDING), False, 0)
-        assert "NOT reviewed" not in pr.approval_body(head_sha="a" * 40, repo="r")
+        assert "NOT opened" not in pr.render(list(self.FINDING), False, 0)
+        assert "NOT opened" not in pr.approval_body(head_sha="a" * 40, repo="r")
 
     def test_a_long_list_is_capped_with_a_count(self, pr):
         body = pr.render(list(self.FINDING), True, 0,
@@ -126,7 +127,14 @@ class TestTheModelIsToldByName:
         monkeypatch.setattr(pr, "pr_diff",
                             lambda *a: ("--- a/x\n+++ b/x\n@@\n", ["src/big.py"], 0))
         monkeypatch.setattr(pr, "_already_reviewed", lambda *a, **k: "")
-        monkeypatch.setattr(pr, "checkout", lambda *a: None)
+        # The skeleton is read from the CHECKOUT, so the checkout has to have
+        # the file in it — which is also the point: an unshown file is real and
+        # readable, not a name in a list.
+        def fake_checkout(repo, sha, work):
+            big = pathlib.Path(work) / "src/big.py"
+            big.parent.mkdir(parents=True, exist_ok=True)
+            big.write_text("def alpha():\n    pass\n\n\nclass Beta:\n    pass\n")
+        monkeypatch.setattr(pr, "checkout", fake_checkout)
         monkeypatch.setattr(pr, "build_context", lambda *a: "")
         monkeypatch.setattr(pr, "conversation", lambda *a: "")
         monkeypatch.setattr(pr, "commit_messages", lambda *a: [])
@@ -138,9 +146,14 @@ class TestTheModelIsToldByName:
         monkeypatch.setattr(pr, "post_review", lambda *a, **k: "COMMENT")
         monkeypatch.setattr(pr.sys, "argv", ["pr-review", "repo", "1"])
         pr.main()
-        assert "NOT INCLUDED" in seen["prompt"]
+        # The SHAPE of the unshown file, not just its name: a list of paths
+        # was something the model could open and mostly did not.
+        assert "FILES THIS DIFF HAD NO ROOM FOR" in seen["prompt"]
         assert "src/big.py" in seen["prompt"]
-        assert "read_file works on them" in seen["prompt"]
+        assert "read_file` works on them" in seen["prompt"]
+        # Its shape, so the model can decide whether to open it.
+        assert "6 lines" in seen["prompt"]
+        assert "alpha:1" in seen["prompt"] and "Beta:5" in seen["prompt"]
 
 
 class TestTheFingerprintIgnoresPackingOrder:

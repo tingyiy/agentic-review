@@ -130,6 +130,22 @@ class Workspace:
         return full
 
 
+def _record_opened(stats, name, raw):
+    """Note the path of a successful `read_file`, for the caller's caveat.
+
+    Best-effort and silent: a malformed argument list is the tool's problem to
+    report, and bookkeeping must never raise inside the loop.
+    """
+    if name != "read_file":
+        return
+    try:
+        path = (json.loads(raw or "{}") or {}).get("path")
+    except (ValueError, TypeError):
+        return
+    if isinstance(path, str) and path:
+        stats.setdefault("opened", set()).add(path)
+
+
 def _truncate(text, limit=MAX_TOOL_CHARS):
     if len(text) <= limit:
         return text
@@ -661,6 +677,10 @@ def run(system, user, root, model=None, deadline=900, max_turns=MAX_TURNS,
             t1 = time.monotonic()
             tool_calls_made[0] += 1
             stats["tool_calls"] = tool_calls_made[0]
+            # WHICH FILES IT ACTUALLY OPENED. A partial review that names every
+            # unshown file as unreviewed is wrong about the ones the agent went
+            # and read; only the untouched ones deserve the caveat.
+            _record_opened(stats, name, raw)
             result = _call_tool(ws, name, raw)
             note(f"  {name}({_arg_summary(raw)}) -> {len(result)} chars "
                  f"in {time.monotonic() - t1:.2f}s")
