@@ -482,7 +482,7 @@ def commit_messages(repo, pr):
         return []
 
 
-def build_context(repo, pr, meta, work, changed, diff):
+def build_context(repo, pr, meta, work, changed, diff, excluded=()):
     """Everything the reviewer is TOLD, as opposed to what it can go and find.
 
     The order is deliberate and it is the order a human would read in: the
@@ -527,9 +527,18 @@ def build_context(repo, pr, meta, work, changed, diff):
     if ci_section:
         print("  ci: " + ("pending" if "still running" in ci_section else "results")
               + " on the head commit", flush=True)
-    xref_section = ctx.cross_references(work, diff, changed)
+    # BEFORE the greps, not after: up to MAX_XREF_NAMES subprocesses run here,
+    # each with its own timeout, and a silent four minutes reads as a hang.
+    names = ctx.xref_names(diff)
+    if names:
+        print(f"  cross-refs: searching {min(len(names), ctx.MAX_XREF_NAMES)} "
+              f"name(s) used by this change", flush=True)
+    xref_section = ctx.cross_references(work, diff, changed,
+                                        also_changed=excluded)
     if xref_section:
-        print(f"  cross-refs: {xref_section.count(chr(10) + '- ')} name(s) also "
+        # The row marker, not every bullet: the "list cut" line is a bullet too,
+        # and counting it reported one name more than the section carries.
+        print(f"  cross-refs: {xref_section.count('` also in:')} name(s) also "
               "used outside the diff", flush=True)
     return (ctx.build(work, changed, ticket_section, linked_section, xref_section)
             + ci_section)
@@ -2576,7 +2585,7 @@ def main():
         shown = ctx.expand_hunks(diff, work, max_chars=int(MAX_DIFF * 1.6))
         prompt = PROMPT.format(repo=repo, path=work, diff=shown, caveats=caveats,
                                context=build_context(repo, pr, meta, work, changed,
-                                                     diff),
+                                                     diff, excluded),
                                prior=conversation(repo, pr))
         findings = review_findings(prompt, work, repo)
         # ONE pass that drops, corrects and adds — against the conversation that

@@ -207,7 +207,8 @@ def run_ours(repo, pr, at=None):
         # `diff` is REQUIRED, and that is deliberate: it was optional, this
         # call omitted it, and the cross-reference section silently switched
         # itself off in the very harness that measures whether it helps.
-        context = review.build_context(repo, pr, meta, work, changed, diff)
+        context = review.build_context(repo, pr, meta, work, changed, diff,
+                                       excluded)
         prompt = review.PROMPT.format(
             repo=repo, path=work, diff=diff, caveats=caveats, context=context,
             # NOT the real conversation. Every one of these PRs already carries

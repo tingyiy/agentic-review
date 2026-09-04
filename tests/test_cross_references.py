@@ -145,10 +145,34 @@ class TestTheEvalPathUsesIt:
         sig = inspect.signature(review.build_context)
         assert sig.parameters["diff"].default is inspect.Parameter.empty
 
-    def test_the_eval_harness_passes_it(self):
-        from pathlib import Path
-        src = (Path(__file__).resolve().parents[1] / "eval/compare.py").read_text()
-        assert "build_context(repo, pr, meta, work, changed, diff)" in src
+    def test_the_eval_harness_passes_the_runtime_diff(self, monkeypatch):
+        """Asserted by CALL, not by source text: a grep for the call site
+        passes through any equivalent rewrite and fails on a harmless one.
+        This repository's own rule, and the reviewer caught it here."""
+        import json
+        import eval.compare as compare
+        from agentic_review import review
+
+        seen = {}
+        diff = "--- a/x\n+++ b/x\n@@\n+const the_key = 1;\n"
+        monkeypatch.setattr(review, "gh", lambda *a, **k: json.dumps(
+            {"head": {"sha": "a" * 40}, "title": "t", "body": "",
+             "user": {"login": "u"}}))
+        monkeypatch.setattr(compare, "_diff_at", lambda *a: (diff, [], 0))
+        monkeypatch.setattr(review, "checkout", lambda *a: None)
+        monkeypatch.setattr(review, "review_findings", lambda *a, **k: [])
+        monkeypatch.setattr(review, "_revise", lambda f, w, r: (f, []))
+        monkeypatch.setattr(review.checks, "run_all", lambda *a, **k: [])
+        monkeypatch.setattr(review, "commit_messages", lambda *a: [])
+
+        def spy(repo, pr, meta, work, changed, diff_arg, excluded=()):
+            seen["diff"] = diff_arg
+            return ""
+        monkeypatch.setattr(review, "build_context", spy)
+        compare.run_ours("app", 1)
+        assert "the_key" in seen["diff"], (
+            "the harness must hand build_context the real diff, or every "
+            "diff-derived section measures itself as absent")
 
 
 class TestItIsInTheContextBlock:
@@ -159,3 +183,38 @@ class TestItIsInTheContextBlock:
 
     def test_an_empty_section_adds_nothing(self):
         assert "XREF" not in ctx.build("/w", [], xref_section="")
+
+
+class TestTheSecondRoundOfReviewFindings:
+    """Six findings from the automated review of this PR, each pinned."""
+
+    @pytest.mark.parametrize("line,expected", [
+        ("+.wallet-card:hover {", "wallet-card"),
+        ("+.prog--cpsa.active {", "prog--cpsa"),
+        ("+.side-panel > .row {", "side-panel"),
+        ("+.card::after {", "card"),
+        ("+.a-list, .b-list {", "a-list"),
+    ])
+    def test_css_declarations_beyond_brace_and_comma(self, line, expected):
+        """CSS is the primary use case and a `{`-or-`,`-only pattern missed
+        most real declarations — including the class conflict this feature was
+        built to catch."""
+        assert expected in ctx.xref_names(line)
+
+    def test_a_cut_is_announced_even_when_no_row_survived(self):
+        """The case where it matters most: the searched names had no outside
+        hit, and the ones never searched are invisible."""
+        diff = "".join(f"+const name_{i}_x = 1;\n" for i in range(40))
+        out = ctx.cross_references("/w", diff, set(), run=lambda w, n: [])
+        assert "list cut for length" in out
+
+    def test_a_file_the_diff_dropped_is_not_called_untouched(self):
+        """`changed` comes from the diff SHOWN, which the budget may have cut.
+        Without `also_changed` the prompt says the change does not touch a file
+        it does touch, and the model treats an updated consumer as stale."""
+        diff = "+const the_key = 1;\n"
+        assert ctx.cross_references(
+            "/w", diff, {"a.ts"}, run=lambda w, n: ["big.ts"],
+            also_changed=["big.ts"]) == ""
+        assert "big.ts" in ctx.cross_references(
+            "/w", diff, {"a.ts"}, run=lambda w, n: ["big.ts"])

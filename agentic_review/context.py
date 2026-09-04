@@ -301,7 +301,10 @@ _XREF_STOP = {
 _XREF_PATTERNS = (
     # A CSS class the change declares or applies: `.prog--cpsa {`, `class="x"`,
     # `classList.add('x')`, `className={'x'}`.
-    re.compile(r"^\s*\.([a-zA-Z][\w-]{2,})\s*[,{]"),
+    # `.x {`, `.x, .y {`, `.x:hover {`, `.x.active {`, `.x > .y {`, `.x::after`.
+    # Anything but a word character ends the name; CSS declarations are the
+    # primary use case and a `{`-or-`,`-only pattern missed most of them.
+    re.compile(r"^\s*\.([a-zA-Z][\w-]{2,})(?=[\s,{:.>+~\[])"),
     re.compile(r"""class(?:Name)?\s*=\s*\{?\s*["']([^"'}]{3,80})["']"""),
     re.compile(r"""classList\.(?:add|remove|toggle)\(\s*["']([\w-]{3,})["']"""),
     # A key or status value the change reads or writes, as a quoted literal
@@ -340,7 +343,7 @@ def xref_names(diff):
     return out
 
 
-def cross_references(work, diff, changed_paths, run=None):
+def cross_references(work, diff, changed_paths, run=None, also_changed=()):
     """Where else the repository mentions the names this change introduces.
 
     Never raises: every grep is best-effort, and a review without this section
@@ -349,7 +352,11 @@ def cross_references(work, diff, changed_paths, run=None):
     names = xref_names(diff)[:MAX_XREF_NAMES]
     if not names:
         return ""
-    changed = set(changed_paths or ())
+    # `changed_paths` comes from the diff SHOWN, which `pr_diff` may have cut
+    # at the budget. A file the PR touches but the diff dropped would otherwise
+    # be reported as untouched, and the model would treat an already-updated
+    # consumer as stale. `also_changed` carries those paths.
+    changed = set(changed_paths or ()) | set(also_changed or ())
     runner = run or _git_grep_files
     rows, used, dropped = [], 0, 0
     for name in names:
@@ -377,11 +384,15 @@ def cross_references(work, diff, changed_paths, run=None):
             break
         rows.append(row)
         used += len(row)
+    cut = dropped or len(xref_names(diff)) > len(names)
+    if cut:
+        # ANNOUNCED EVEN WHEN NOTHING SURVIVED. An early "return ''" here hid
+        # the cut in the one case where it matters most: the searched names
+        # had no outside hit and the unsearched ones were never tried.
+        rows.append("- (list cut for length — `grep -rl <name>` for any other "
+                    "name this change touches)")
     if not rows:
         return ""
-    if dropped or len(xref_names(diff)) > len(names):
-        rows.append(f"- (list cut for length — `grep -rl <name>` for any other "
-                    f"name this change touches)")
     return ("\nWHERE ELSE THESE NAMES APPEAR. Each name below is introduced or\n"
             "handled by this change AND occurs in files the change does not\n"
             "touch. That second occurrence is the question: is it another\n"
