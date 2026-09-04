@@ -76,7 +76,8 @@ class TestTheSection:
         files = {f"f{i}.py": "def a():\n    pass\n" for i in range(40)}
         w = _repo(tmp_path, files)
         out = ctx.skeletons(w, sorted(files))
-        assert out.count("\n- ") <= ctx.MAX_SKELETON_FILES
+        assert out.count("` (") <= ctx.MAX_SKELETON_FILES
+        assert "and 15 more not shown" in out
 
     def test_the_whole_section_is_bounded(self, tmp_path):
         files = {f"dir{i}/{'n' * 80}.py": "def a():\n    pass\n" for i in range(30)}
@@ -264,3 +265,56 @@ class TestReadingThemAllUnblocksTheStaleBlock:
         the agent did look where the old finding was."""
         assert self._truncated_seen_by_post(
             monkeypatch, opened={"src/big.py"}) is False
+
+
+class TestTheThirdRoundFromOurOwnReviewer:
+    """Five findings, from this reviewer running hosted against this PR."""
+
+    def test_the_revision_pass_contributes_its_opened_files(self, monkeypatch):
+        """`_revise` had its own `stats` and dropped them, so a file opened
+        only while reconsidering was still reported as never opened — while
+        the commit message claimed the accumulation was complete."""
+        import json
+        from agentic_review import review as pr
+        monkeypatch.setitem(pr._CURRENT, "opened", {"already.py"})
+        # `_revise` resumes the review pass's conversation, so there has to be
+        # one for it to get as far as the agent.
+        monkeypatch.setitem(pr._CURRENT, "stats", {"messages": [{"role": "user"}]})
+        monkeypatch.setattr(pr.agent, "resume", lambda *a, **k:
+                            (k["stats"].update(opened={"during_revision.py"},
+                                               tool_calls=1)
+                             or (json.dumps({"revisions": [
+                                 {"index": 0, "action": "keep"}]}), [])))
+        pr._revise([{"file": "a", "line": 1, "severity": "low",
+                     "title": "t", "detail": "d"}], "/tmp", "repo")
+        assert pr._CURRENT["opened"] == {"already.py", "during_revision.py"}
+
+    def test_a_partial_read_does_not_count_as_opened(self):
+        """`_read_file` returns 200 lines and says so. Counting that as opened
+        cleared the caveat on a 255-line file the agent had seen four fifths
+        of, and let the review approve on it."""
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(stats, "read_file", '{"path": "big.py"}',
+                             "1\tx\n[showing lines 1-200 of 255. "
+                             "Call again with offset=201 for the rest.]")
+        assert stats.get("opened") is None
+
+    def test_a_whole_read_still_counts(self):
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(stats, "read_file", '{"path": "small.py"}',
+                             "1\tdef a():\n2\t    pass")
+        assert stats["opened"] == {"small.py"}
+
+    def test_a_clipped_file_says_its_length_is_a_prefix(self, tmp_path):
+        """Reporting the prefix's line count as the file's length is a wrong
+        shape stated confidently."""
+        big = tmp_path / "huge.py"
+        big.write_text("x = 1\n" * (ctx.MAX_SKELETON_READ // 3))
+        row = ctx.file_skeleton(str(tmp_path), "huge.py")
+        assert "of a larger file" in row
+
+    def test_a_small_file_reports_its_real_length(self, tmp_path):
+        w = _repo(tmp_path, {"s.py": "a = 1\nb = 2\n"})
+        assert "(2 lines)" in ctx.file_skeleton(w, "s.py")

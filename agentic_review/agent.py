@@ -146,7 +146,14 @@ def _record_opened(stats, name, raw, result):
     Best-effort and silent otherwise: bookkeeping must never raise inside the
     loop.
     """
-    if name != "read_file" or str(result or "").startswith(TOOL_ERROR_PREFIX):
+    text = str(result or "")
+    if name != "read_file" or text.startswith(TOOL_ERROR_PREFIX):
+        return
+    # A WINDOW IS NOT THE FILE. `_read_file` returns 200 lines by default and
+    # says so in a footer; counting that as "opened" would clear the caveat on
+    # a 255-line file the agent had seen four fifths of, and let the review
+    # approve on it. Only a read that reached the end counts.
+    if _PARTIAL_READ.search(text):
         return
     try:
         path = (json.loads(raw or "{}") or {}).get("path")
@@ -339,6 +346,11 @@ TOOLS = [
 
 _DISPATCH = {"read_file": _read_file, "grep": _grep, "list_files": _list_files}
 
+
+#: `_read_file`'s footer when a window did not reach the end of the file. The
+#: footer is the only thing that distinguishes a partial read from a whole one,
+#: and this pairs with the code that writes it — change one, change both.
+_PARTIAL_READ = re.compile(r"\[showing lines \d+-\d+ of \d+\.")
 
 #: How `_call_tool` spells a failure. A tool result is a string either way, so
 #: anything reading results — `_record_opened`, for one — has to be able to

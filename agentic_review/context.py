@@ -544,10 +544,11 @@ def file_skeleton(work, path, max_decls=MAX_SKELETON_DECLS):
                 os.path.join(root, path)):
             return ""
         with open(full, "r", errors="replace") as fh:
-            text = fh.read(MAX_SKELETON_READ)
+            text = fh.read(MAX_SKELETON_READ + 1)
     except (OSError, ValueError):
         return ""
-    lines = text.splitlines()
+    clipped = len(text) > MAX_SKELETON_READ
+    lines = text[:MAX_SKELETON_READ].splitlines()
     decls = []
     for n, line in enumerate(lines, 1):
         if len(line) > 300:
@@ -566,7 +567,12 @@ def file_skeleton(work, path, max_decls=MAX_SKELETON_DECLS):
             break
         decls.append(f"{name}:{n}")
     shape = ", ".join(decls) if decls else "no declarations found"
-    return f"- `{path}` ({len(lines)} lines): {shape}"
+    # A CLIPPED FILE SAYS SO. Reporting the prefix's line count as the file's
+    # length, and its declarations as all of them, is a wrong shape stated
+    # confidently — worse than no shape at all.
+    length = (f"first {len(lines)} lines of a larger file" if clipped
+              else f"{len(lines)} lines")
+    return f"- `{path}` ({length}): {shape}"
 
 
 def skeletons(work, paths):
@@ -575,15 +581,24 @@ def skeletons(work, paths):
     Never raises, and never claims to be complete: a file that cannot be read
     is simply absent, which is the same outcome as before this existed.
     """
-    rows, used = [], 0
-    for path in list(paths or [])[:MAX_SKELETON_FILES]:
+    wanted = list(paths or [])
+    rows, used, dropped = [], 0, max(0, len(wanted) - MAX_SKELETON_FILES)
+    for path in wanted[:MAX_SKELETON_FILES]:
         row = file_skeleton(work, path)
-        if not row or used + len(row) > MAX_SKELETON_CHARS:
+        if not row:
+            continue
+        if used + len(row) > MAX_SKELETON_CHARS:
+            dropped += 1
             continue
         rows.append(row)
         used += len(row)
     if not rows:
         return ""
+    if dropped:
+        # SAY WHAT WAS CUT, like every other truncation here. A list that reads
+        # as exhaustive stops the model looking for what is missing from it.
+        rows.append(f"- (and {dropped} more not shown — they are in the "
+                    f"checkout and `read_file` works on them)")
     return ("\nFILES THIS DIFF HAD NO ROOM FOR. They are in the checkout and\n"
             "`read_file` works on them — what follows is their shape, so you can\n"
             "decide which are worth opening. A change is not unreviewed because\n"

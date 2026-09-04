@@ -747,9 +747,8 @@ def _run_agent(prompt, cwd, timeout=AGENT_TIMEOUT, repo="", pr=""):
         # wrong for this: a file read during the first pass or the revision
         # would be reported as never opened because a later pass overwrote the
         # record of it.
-        opened = set(_CURRENT.get("opened") or set()) | set(stats.get("opened") or set())
         _CURRENT["stats"] = dict(stats)
-        _CURRENT["opened"] = opened
+        _merge_opened(stats)
         return text.strip()
     except agent.Timeout as e:
         _print_transcript(e.transcript)
@@ -1388,6 +1387,17 @@ def _listed(findings):
         for i, f in enumerate(findings))
 
 
+def _merge_opened(stats):
+    """Fold one pass's opened paths into the review's running set.
+
+    Every pass reads files and every pass keeps its own `stats`, so the set has
+    to be merged rather than replaced — the last pass winning would report a
+    file opened by an earlier one as never opened.
+    """
+    _CURRENT["opened"] = set(_CURRENT.get("opened") or set()) | set(
+        (stats or {}).get("opened") or set())
+
+
 def _revise(findings, work, repo):
     """One pass that can drop, correct and add — against the conversation that
     already read the code.
@@ -1443,7 +1453,14 @@ def _revise(findings, work, repo):
     except Exception as e:  # noqa: BLE001 — a revision must never lose a review
         print(f"  revision unavailable ({type(e).__name__}: {str(e)[:90]}) — "
               f"posting all {len(findings)} finding(s) as written", flush=True)
+        _merge_opened(stats)
         return findings, []
+    # BEFORE the reply is judged. `_run_agent` accumulates what its own pass
+    # opened; this pass had its own `stats` and dropped them on every path,
+    # including the three that return early — so a file the reviewer opened
+    # while reconsidering was still reported as never opened. Whether the reply
+    # parsed has nothing to do with whether the file was read.
+    _merge_opened(stats)
     if not reply:
         return findings, []
     try:
