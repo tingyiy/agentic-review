@@ -336,3 +336,31 @@ class TestSkippedFilesAreKnownToBeChanged:
         assert ctx.cross_references(
             "/w", "+const the_key = 1;\n", set(),
             run=lambda w, n: [path], also_changed=[path]) == ""
+
+
+class TestWhichNamesTheCapSpendsItselfOn:
+    """Appearance order put `prog--cpsa` at position 26 of 55 on the PR this
+    feature was built for, past a cap of 12, so the class behind the defect was
+    never searched. Shape decides the order now."""
+
+    def test_separator_names_come_first(self):
+        assert ctx.rank_names(
+            ["groups", "renderThing", "prog--cpsa", "byEmployer", "wire_key"]
+        ) == ["prog--cpsa", "wire_key", "renderThing", "byEmployer", "groups"]
+
+    def test_order_within_a_tier_is_preserved(self):
+        """Deterministic: two runs on the same diff search the same names."""
+        assert ctx.rank_names(["a-one", "b-two", "c-three"]) == [
+            "a-one", "b-two", "c-three"]
+
+    def test_the_cap_is_sized_on_measured_cost(self):
+        """30 greps: 0.89s on browser-extension, 0.69s on slack-app. The
+        subprocesses were never the constraint; MAX_XREF_CHARS is."""
+        assert ctx.MAX_XREF_NAMES >= 24
+
+    def test_the_row_budget_still_holds_at_the_larger_cap(self):
+        diff = "".join(f"+const name_{i}_x = 1;\n" for i in range(60))
+        long_path = "src/" + "d" * 120 + ".ts"
+        out = ctx.cross_references("/w", diff, set(), run=lambda w, n: [long_path])
+        rows = [l for l in out.splitlines() if l.startswith("- `")]
+        assert sum(len(r) for r in rows) <= ctx.MAX_XREF_CHARS

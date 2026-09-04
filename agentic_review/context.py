@@ -281,9 +281,18 @@ def build(work, changed_paths, tracker_section="", linked_section="",
 #:
 #: The name cap bounds the SEARCHES, not the rows: a name with no outside hit
 #: produces no row, so capping rows alone let a large diff spend one 20-second
-#: subprocess per extracted name while still advertising a 12-name bound.
-MAX_XREF_NAMES = 12
+#: subprocess per extracted name while still advertising the bound.
+#:
+#: 12 was a guess, and it was too small for the case this exists to catch: on
+#: the PR that motivated the feature, 18 names carried a separator and
+#: `prog--cpsa` — the class behind the defect — sat past the cut. MEASURED
+#: instead: 30 greps take 0.89s on browser-extension and 0.69s on slack-app,
+#: so the subprocesses are not the constraint. `MAX_XREF_CHARS` bounds what
+#: reaches the prompt on its own, which is the constraint that matters.
+MAX_XREF_NAMES = 30
 MAX_XREF_FILES = 4
+#: The ROWS' budget, not the section's: the explanatory header is fixed
+#: overhead and is not worth making the pointer list shorter to pay for.
 MAX_XREF_CHARS = 2_400
 
 #: Paths whose contents are not worth pointing a reviewer at, and which
@@ -371,13 +380,41 @@ def xref_names(diff):
     return out
 
 
+#: `prog--cpsa`, `unspecified_keys`, `EMPLOYER_KEY_PREFIX`, `caeli_visitor_id`.
+#: A dash or an underscore is what a CSS class, a wire key, a storage key and a
+#: shared constant have in common, and all four MEAN something on the other
+#: side of a file boundary — which is the entire question this section asks.
+_HYPHEN_OR_UNDERSCORE = re.compile(r"[-_]")
+
+#: `renderEmployerPrograms`, `byEmployer`. Usually a function or a local, and
+#: usually confined to the file that declares it — worth chasing after the
+#: first group, not instead of it.
+_CAMEL = re.compile(r"[a-z][A-Z]")
+
+
+def rank_names(names):
+    """The order the cap should spend itself in.
+
+    Appearance order alone put `prog--cpsa` — the class behind a defect this
+    reviewer missed three runs running — at position 26 of 55, past a cap of
+    12, so it was never searched at all. Ranking by shape fixes that without
+    guessing at meaning: within each tier the original order is kept, so the
+    result stays deterministic.
+    """
+    tiers = ([], [], [])
+    for n in names:
+        tiers[0 if _HYPHEN_OR_UNDERSCORE.search(n)
+              else 1 if _CAMEL.search(n) else 2].append(n)
+    return tiers[0] + tiers[1] + tiers[2]
+
+
 def cross_references(work, diff, changed_paths, run=None, also_changed=()):
     """Where else the repository mentions the names this change introduces.
 
     Never raises: every grep is best-effort, and a review without this section
     is the review we shipped for weeks.
     """
-    names = xref_names(diff)[:MAX_XREF_NAMES]
+    names = rank_names(xref_names(diff))[:MAX_XREF_NAMES]
     if not names:
         return ""
     # `changed_paths` comes from the diff SHOWN, which `pr_diff` may have cut
