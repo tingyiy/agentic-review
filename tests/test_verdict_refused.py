@@ -1,0 +1,74 @@
+"""When GitHub refuses the VERDICT but not the review.
+
+Measured on this repository's own first hosted self-review: a clean diff, 0
+findings, an APPROVE — and a 422, because the workflow's own GITHUB_TOKEN is a
+GitHub App token and an App may not approve a pull request. The fallback only
+knew the "your own pull request" wording, so the whole review was lost to a
+crash on the one shape a clean PR always takes.
+"""
+import io
+import urllib.error
+
+import pytest
+
+from agentic_review import review as pr
+
+
+def _wire(monkeypatch, refusal_body):
+    posted = []
+
+    def gh(path, method="GET", body=None, accept=""):
+        if method == "POST" and path.endswith("/reviews"):
+            ev = (body or {}).get("event")
+            posted.append(ev)
+            if ev != "COMMENT":
+                raise urllib.error.HTTPError(
+                    path, 422, "Unprocessable Entity", {},
+                    io.BytesIO(refusal_body.encode()))
+        return "[]"
+    monkeypatch.setattr(pr, "gh", gh)
+    monkeypatch.setattr(pr, "_withdraw_stale_approval", lambda *a: None)
+    return posted
+
+
+class TestTheFindingsSurviveARefusedVerdict:
+    @pytest.mark.parametrize("refusal", [
+        '{"message":"Review cannot be submitted","errors":['
+        '"GitHub Apps are not permitted to approve pull requests"]}',
+        '{"message":"Can not approve your own pull request"}',
+        '{"message":"Unprocessable Entity","errors":["cannot approve"]}',
+    ])
+    def test_it_falls_back_to_a_comment(self, monkeypatch, refusal):
+        posted = _wire(monkeypatch, refusal)
+        out = pr.post_review("app", 1, "APPROVE", "body")
+        assert posted == ["APPROVE", "COMMENT"]
+        assert out.startswith("COMMENT (approve refused")
+
+    def test_it_names_which_refusal_it_hit(self, monkeypatch):
+        """A clean review that silently became a comment reads as an approval
+        that never happened; the log has to say which verdict was withheld."""
+        _wire(monkeypatch, '{"errors":["GitHub Apps are not permitted to approve"]}')
+        assert "this token may not set a verdict" in pr.post_review(
+            "app", 1, "APPROVE", "body")
+
+    def test_the_own_pr_wording_is_still_recognised(self, monkeypatch):
+        _wire(monkeypatch, '{"message":"Can not approve your own pull request"}')
+        assert "own PR" in pr.post_review("app", 1, "APPROVE", "body")
+
+    def test_an_unrelated_422_still_raises(self, monkeypatch):
+        """422 is GitHub's catch-all. Swallowing every one of them downgraded a
+        blocking verdict AND printed a fabricated reason for it."""
+        _wire(monkeypatch, '{"message":"body is too long"}')
+        with pytest.raises(urllib.error.HTTPError):
+            pr.post_review("app", 1, "REQUEST_CHANGES", "body")
+
+    def test_a_comment_that_is_refused_still_raises(self, monkeypatch):
+        """There is no verdict left to drop, so the failure is real."""
+        def gh(path, method="GET", body=None, accept=""):
+            if method == "POST":
+                raise urllib.error.HTTPError(
+                    path, 422, "x", {}, io.BytesIO(b'{"message":"cannot approve"}'))
+            return "[]"
+        monkeypatch.setattr(pr, "gh", gh)
+        with pytest.raises(urllib.error.HTTPError):
+            pr.post_review("app", 1, "COMMENT", "body")

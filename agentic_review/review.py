@@ -1771,7 +1771,23 @@ def review_event(findings):
 
 #: What GitHub says when it refuses a verdict on your own PR — "Can not approve
 #: your own pull request" / "Can not request changes on your own pull request".
+#: The refusals GitHub answers a verdict with, and which are ABOUT THE POSTER
+#: rather than about the review. Both end the same way — the findings are worth
+#: posting, the verdict is not available — so both fall back to a comment.
+#:
+#:   · your own pull request — a human token reviewing its author's PR;
+#:   · a GitHub App's token cannot APPROVE at all, which is what the workflow's
+#:     own GITHUB_TOKEN is. Measured on this repository's first hosted
+#:     self-review: a clean diff, 0 findings, and the whole review lost to a
+#:     422 because approving was the one thing it could not do.
 SELF_REVIEW_REFUSAL = "your own pull request"
+VERDICT_REFUSALS = (
+    SELF_REVIEW_REFUSAL,
+    "not permitted to approve",
+    "cannot approve",
+    "can not approve",
+    "review cannot be submitted",
+)
 
 
 #: What the dismissal says. It is a claim about OUR earlier objection, not about
@@ -1989,12 +2005,16 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
             detail = e.read().decode("utf-8", "replace")
         except Exception:  # noqa: BLE001 — the body is best-effort context
             detail = ""
-        if SELF_REVIEW_REFUSAL not in detail.lower():
+        low = detail.lower()
+        if not any(r in low for r in VERDICT_REFUSALS):
             raise
-        # GitHub refuses BOTH approval and changes-requested on your own PR.
-        # The findings are still worth posting, just without the verdict.
+        # The verdict is refused, the findings are not. Post them as a comment
+        # and SAY which verdict was withheld, so a clean review is not read as
+        # an approval that never happened.
         post("COMMENT")
-        return f"COMMENT ({event.lower().replace('_', ' ')} refused on own PR)"
+        why = ("own PR" if SELF_REVIEW_REFUSAL in low
+               else "this token may not set a verdict")
+        return f"COMMENT ({event.lower().replace('_', ' ')} refused — {why})"
 
 
 #: A markdown link or image, and a bare autolink. `detail` and `title` are
