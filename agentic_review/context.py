@@ -19,6 +19,7 @@ that it has seen everything.
 """
 import json
 import os
+import pathlib
 import re
 import subprocess
 
@@ -484,6 +485,139 @@ def cross_references(work, diff, changed_paths, run=None, also_changed=()):
             "updated, or simply an unrelated use? Open the ones that matter —\n"
             "this list is a pointer, not an answer, and an unrelated match is\n"
             "the common case.\n\n" + "\n".join(rows) + "\n")
+
+
+# --------------------------------------------------------------------------
+# Skeletons: the shape of a file the diff had no room to show
+# --------------------------------------------------------------------------
+# A PR bigger than the diff budget used to lose its tail entirely — the review
+# said "these files were NOT reviewed" and stopped. But the agent is standing
+# in a checkout with `read_file` and `grep`, so an unshown file is not
+# unreachable, only unadvertised. What it lacked was a reason to look.
+#
+# So each unshown file contributes its SHAPE instead of its diff: how long it
+# is, and the declarations in it with their line numbers. A few hundred
+# characters against the five to eleven thousand the diff would have cost, and
+# the agent can pull any region it decides matters.
+
+#: Lines that declare something worth naming, across the languages these
+#: repositories actually use. Deliberately shallow: this is a table of
+#: contents, not a parse, and a wrong entry costs one wasted read.
+_DECL = re.compile(
+    r"^\s*(?:export\s+(?:default\s+)?)?"
+    r"(?:async\s+)?"
+    r"(?:"
+    r"(?:def|class)\s+(\w+)"                       # python
+    r"|(?:function)\s+(\w+)"                       # js/ts
+    r"|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>"
+    r"|(?:interface|type|enum)\s+(\w+)"            # ts
+    r"|(?:func)\s+(?:\([^)]*\)\s*)?(\w+)"          # go
+    r")")
+
+#: Per file, and overall. A skeleton that runs long stops being a map.
+MAX_SKELETON_DECLS = 12
+MAX_SKELETON_FILES = 25
+MAX_SKELETON_CHARS = 4_000
+
+#: How much of a file is read to find its declarations. A skeleton is a table
+#: of contents; nothing past this changes what it says, and an unbounded read
+#: of an unexpectedly enormous file is a cost with no benefit.
+MAX_SKELETON_READ = 400_000
+
+
+def file_skeleton(work, path, max_decls=MAX_SKELETON_DECLS):
+    """`path`'s length and its declarations, or "" if it cannot be read.
+
+    CONTAINED, like every other read of the checkout. A changed path can be a
+    symlink to somewhere else on the host — the agent's own `Workspace.resolve`
+    has refused that since the beginning, and this read was going around it.
+    Worse than reading the wrong file: `/dev/zero` would have hung the review
+    before the agent started. Regular files only, resolved, under `work`.
+    """
+    try:
+        root = os.path.realpath(work)
+        full = os.path.realpath(os.path.join(root, path))
+        if os.path.isabs(path) or (
+                full != root and os.path.commonpath([full, root]) != root):
+            return ""
+        if not os.path.isfile(full) or os.path.islink(
+                os.path.join(root, path)):
+            return ""
+        with open(full, "r", errors="replace") as fh:
+            text = fh.read(MAX_SKELETON_READ + 1)
+    except (OSError, ValueError):
+        return ""
+    clipped = len(text) > MAX_SKELETON_READ
+    lines = text[:MAX_SKELETON_READ].splitlines()
+    decls = []
+    for n, line in enumerate(lines, 1):
+        if len(line) > 300:
+            continue                      # minified or generated
+        m = _DECL.match(line)
+        if not m:
+            continue
+        name = next((g for g in m.groups() if g), None)
+        if not name:
+            continue
+        if len(decls) >= max_decls:
+            # Only now is something ACTUALLY omitted. Appending the marker on
+            # reaching the cap claimed a truncation on a file with exactly
+            # `max_decls` declarations and nothing left to show.
+            decls.append("…")
+            break
+        decls.append(f"{name}:{n}")
+    shape = ", ".join(decls) if decls else "no declarations found"
+    # A CLIPPED FILE SAYS SO. Reporting the prefix's line count as the file's
+    # length, and its declarations as all of them, is a wrong shape stated
+    # confidently — worse than no shape at all.
+    length = (f"first {len(lines)} lines of a larger file" if clipped
+              else f"{len(lines)} lines")
+    return f"- `{path}` ({length}): {shape}"
+
+
+def skeletons(work, paths):
+    """The shape of every file the diff had no room for.
+
+    Never raises. A file whose shape cannot be read — deleted by this change,
+    a symlink out of the checkout, a device — is still NAMED, with its shape
+    reported as unavailable: the caveat this replaced listed every excluded
+    file, and dropping the unreadable ones would be a regression in coverage
+    for exactly the files worth asking about.
+    """
+    wanted = list(paths or [])
+    rows, used, dropped = [], 0, max(0, len(wanted) - MAX_SKELETON_FILES)
+    for path in wanted[:MAX_SKELETON_FILES]:
+        row = file_skeleton(work, path) or (
+            # NAMED EVEN WHEN ITS SHAPE CANNOT BE READ — deleted by this
+            # change, a symlink out of the checkout, a device. The old
+            # name-only caveat listed every excluded file; dropping the
+            # unreadable ones silently would make this a REGRESSION in
+            # coverage for exactly the files worth asking about.
+            f"- `{path}`: shape unavailable (deleted here, or not a readable "
+            f"file in the checkout)")
+        if not row:
+            continue
+        if used + len(row) > MAX_SKELETON_CHARS:
+            dropped += 1
+            continue
+        rows.append(row)
+        used += len(row)
+    if not rows and not dropped:
+        return ""
+    if dropped:
+        # SAY WHAT WAS CUT, like every other truncation here. A list that reads
+        # as exhaustive stops the model looking for what is missing from it.
+        rows.append(f"- (and {dropped} more not shown — they are changed "
+                    f"files in this PR; `read_file` reaches any that still "
+                    f"exist in the checkout)")
+    return ("\nFILES THIS DIFF HAD NO ROOM FOR. What follows is their shape, so\n"
+            "you can decide which are worth opening; `read_file` reaches any\n"
+            "that still exist in the checkout, and a row saying its shape is\n"
+            "unavailable means that one does not — deleted by this change, or\n"
+            "not a readable file. A change is not unreviewed because it did not\n"
+            "fit; it is unreviewed if you do not look. Open the ones the change\n"
+            "depends on, and say in your findings if you did not.\n\n"
+            + "\n".join(rows) + "\n")
 
 
 def _git_grep_files(work, name):

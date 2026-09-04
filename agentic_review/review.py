@@ -742,7 +742,13 @@ def _run_agent(prompt, cwd, timeout=AGENT_TIMEOUT, repo="", pr=""):
         # confirmation pass approves on the model's own account of what it
         # checked, and that account is worth exactly as much as the tool calls
         # behind it.
+        # ACCUMULATE the opened paths, replace everything else. `stats` is
+        # per-pass and the last pass wins, which is right for turn counts and
+        # wrong for this: a file read during the first pass or the revision
+        # would be reported as never opened because a later pass overwrote the
+        # record of it.
         _CURRENT["stats"] = dict(stats)
+        _merge_opened(stats)
         return text.strip()
     except agent.Timeout as e:
         _print_transcript(e.transcript)
@@ -1381,6 +1387,33 @@ def _listed(findings):
         for i, f in enumerate(findings))
 
 
+def _merge_opened(stats):
+    """Fold one pass's reading into the review's running record.
+
+    Every pass reads files and every pass keeps its own `stats`, so this
+    merges rather than replaces — the last pass winning would report a file
+    opened by an earlier one as never opened.
+
+    THE RANGES MERGE TOO, and that is the part that was missing: a file is
+    marked opened only once its windows cover it, and the windows can land in
+    DIFFERENT passes — the review pass reads lines 1-200, the revision reads
+    the rest. Merging only the finished `opened` sets left that file reported
+    as never opened, which is a false caveat. Found by this reviewer.
+    """
+    stats = stats or {}
+    ranges = _CURRENT.setdefault("read_ranges", {})
+    for path, seen in (stats.get("_read_ranges") or {}).items():
+        into = ranges.setdefault(path, {"total": None, "covered": []})
+        into["covered"].extend(seen.get("covered") or [])
+        if seen.get("total") is not None:
+            into["total"] = max(into["total"] or 0, seen["total"])
+    opened = set(_CURRENT.get("opened") or set()) | set(stats.get("opened") or set())
+    for path, seen in ranges.items():
+        if agent.covers_whole_file(seen):
+            opened.add(path)
+    _CURRENT["opened"] = opened
+
+
 def _revise(findings, work, repo):
     """One pass that can drop, correct and add — against the conversation that
     already read the code.
@@ -1436,7 +1469,14 @@ def _revise(findings, work, repo):
     except Exception as e:  # noqa: BLE001 — a revision must never lose a review
         print(f"  revision unavailable ({type(e).__name__}: {str(e)[:90]}) — "
               f"posting all {len(findings)} finding(s) as written", flush=True)
+        _merge_opened(stats)
         return findings, []
+    # BEFORE the reply is judged. `_run_agent` accumulates what its own pass
+    # opened; this pass had its own `stats` and dropped them on every path,
+    # including the three that return early — so a file the reviewer opened
+    # while reconsidering was still reported as never opened. Whether the reply
+    # parsed has nothing to do with whether the file was read.
+    _merge_opened(stats)
     if not reply:
         return findings, []
     try:
@@ -1595,7 +1635,7 @@ def _apply_withdrawals(body, event, findings, withdrawn):
 
 def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
                      head_sha="", repo="", wire_fields=(), diff="",
-                     excluded=()):
+                     excluded=(), saw_every_change=None):
     """The exact body and event this review will post.
 
     The WHOLE composition, not just the withdrawal branch, because the previous
@@ -1605,6 +1645,7 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     what actually gets posted for a given (findings, withdrawn) pair, which is
     the thing that matters.
     """
+    unseen = False
     body = (approval_body(head_sha, repo=repo, wire_fields=wire_fields, diff=diff,
                           excluded=excluded)
             if not findings
@@ -1617,10 +1658,28 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     # one that covered all of them. The files are named in the body either way;
     # the verdict has to stop short too, or the name is a footnote on a green
     # tick.
-    if excluded and event == "APPROVE":
+    # `saw_every_change` is the honest question: an agent that OPENED an
+    # excluded file read it at head and still never saw the diff. Defaults to
+    # "whatever `excluded` says" so every existing caller keeps its behaviour.
+    if event == "APPROVE" and not (
+            saw_every_change if saw_every_change is not None else not excluded):
         event = "COMMENT"
-    return _apply_withdrawals(body, event=event,
-                              findings=findings, withdrawn=withdrawn)
+        unseen = True
+    body, event = _apply_withdrawals(body, event=event,
+                                     findings=findings, withdrawn=withdrawn)
+    # LAST, so it rewrites whatever prose actually survived. With every
+    # excluded file opened there is no unreviewed-files note to carry the news,
+    # so the approval wording would otherwise stand above a COMMENT — the same
+    # false-clean verdict as a refused approval, reached by a different route.
+    # ONLY WHEN THERE IS NO OTHER NOTE. If files remain unopened,
+    # `_unreviewed_files_note` is already at the top saying this is not an
+    # approval, and two notes making overlapping claims read as a bug.
+    if unseen and not excluded:
+        body = _changes_unseen_note() + body.replace(
+            "### AI review — no findings\n",
+            "### AI review — no findings, and not an approval\n").replace(
+            "**What this approval is.**", "**What this would have been.**")
+    return body, event
 
 
 def _one_pass(prompt, work, what):
@@ -2301,6 +2360,20 @@ def _unchecked_consumers_note(repo, wire_fields):
             "consumers in other repositories were NOT checked.")
 
 
+def _changes_unseen_note():
+    """Why a clean review is not an approval when the diff did not fit.
+
+    The files were read — that is why there is no unreviewed-files note — but
+    `read_file` returns the HEAD version, and their patches were never shown.
+    Reading what the code says now is not seeing what the change did to it.
+    """
+    return ("> **⚠️ Not an approval.** Some changed files did not fit the diff "
+            "budget. The agent opened them in the checkout, so nothing went "
+            "unlooked-at — but it saw them AS THEY NOW STAND, not the changes "
+            "made to them. A clean result on that basis is worth reading and "
+            "is not an approval.\n\n")
+
+
 def _unreviewed_files_note(excluded):
     """Name the files this review did not read. Loud, and first.
 
@@ -2314,7 +2387,8 @@ def _unreviewed_files_note(excluded):
     shown = [_code_span(p) for p in excluded[:30]]
     more = f", and {len(excluded) - 30} more" if len(excluded) > 30 else ""
     return (f"> **⚠️ Partial review — {len(excluded)} changed file(s) were NOT "
-            f"reviewed** (over the diff budget): {', '.join(shown)}{more}.\n"
+            f"opened** (they did not fit the diff budget and the agent did not "
+            f"read them): {', '.join(shown)}{more}.\n"
             f"> This is not an approval of those files. Split the PR, or "
             f"request a follow-up review naming them.\n\n")
 
@@ -2611,6 +2685,8 @@ def main():
     llm.reset_usage()
     _CURRENT["wire_fields"] = []
     _CURRENT["stats"] = {}
+    _CURRENT["opened"] = set()
+    _CURRENT["read_ranges"] = {}
     meta = json.loads(gh(f"/repos/{ORG}/{repo}/pulls/{pr}"))
     if meta.get("draft"):
         print("draft — not reviewing")
@@ -2668,12 +2744,10 @@ def main():
         print(f"  agent exploring the checkout (timeout {AGENT_TIMEOUT}s)…", flush=True)
         caveats = ""
         if excluded:
-            # BY NAME. "The diff was truncated" tells the model nothing it can
-            # act on; a list of paths is something it can open.
-            caveats += ("\n[NOT INCLUDED — these changed files did not fit the "
-                        f"diff budget. They ARE in the checkout — read_file works on them; "
-                        "open any the change depends on: "
-                        + ", ".join(excluded) + "]\n")
+            # BY SHAPE, not just by name. A list of paths was something the
+            # model could open and mostly did not; how long each file is and
+            # what it declares is something it can DECIDE on.
+            caveats += ctx.skeletons(work, excluded)
         if skipped:
             caveats += f"[{skipped} generated/binary files omitted]\n"
         changed = _diff_paths(diff)
@@ -2697,12 +2771,39 @@ def main():
                                    commits=commit_messages(repo, pr),
                                    pr_body=meta.get("body") or "", diff=diff)
 
+    # UNREVIEWED MEANS UNOPENED. The agent can read anything in the checkout,
+    # so a file the diff had no room for is not unreviewed if the agent went
+    # and read it — only the ones it never touched deserve the caveat.
+    # Every pass, normalised the same way the loop records them.
+    opened = _CURRENT.get("opened") or set()
+    unopened = [p for p in (excluded or [])
+                if os.path.normpath(p) not in opened]
+    if excluded and len(unopened) < len(excluded):
+        print(f"  the agent opened {len(excluded) - len(unopened)} of "
+              f"{len(excluded)} file(s) the diff could not show", flush=True)
+    # THREE DIFFERENT QUESTIONS, AND THEY WERE RIDING ON ONE FLAG.
+    #
+    #   · the caveat asks "which files did nobody look at" — `unopened`;
+    #   · the stale-block dismissal asks "is the old finding still in the
+    #     code" — answerable from the file AT HEAD, so `unopened` again;
+    #   · the approval cap asks "did this review see every CHANGE" — and
+    #     `read_file` shows the head version, not the diff. An agent that
+    #     read an excluded file knows what the code says and not what the
+    #     change did to it, so this one stays keyed on `excluded`.
+    #
+    # Collapsing the third into the first would let a review approve changes
+    # it never saw, which is the exact overclaim the cap exists to prevent.
+    # Found by this reviewer, on this PR.
+    truncated = bool(unopened)
+    saw_every_change = not excluded
+
     head_sha = meta["head"]["sha"]
     wire_fields = _CURRENT.get("wire_fields") or []
     body, event = _finalize_review(findings, withdrawn, truncated, skipped,
                                    head_sha=head_sha, repo=repo,
                                    wire_fields=wire_fields, diff=diff,
-                                   excluded=excluded)
+                                   excluded=unopened,
+                                   saw_every_change=saw_every_change)
 
     # LAST CHECK BEFORE POSTING. The agent poll aborts a review whose PR merges
     # mid-run, but the window between the agent finishing and the POST is not
