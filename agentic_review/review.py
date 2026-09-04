@@ -1781,12 +1781,16 @@ def review_event(findings):
 #:     self-review: a clean diff, 0 findings, and the whole review lost to a
 #:     422 because approving was the one thing it could not do.
 SELF_REVIEW_REFUSAL = "your own pull request"
+#: Each names the POSTER as the reason. "Review cannot be submitted" was here
+#: too and came out: it is GitHub's generic wrapper, and matching it would send
+#: any 422 carrying that phrase — a stale head, a body over the limit — down
+#: the same path, which is precisely the silent downgrade this guard exists to
+#: prevent. The App refusal is already named by its nested reason.
 VERDICT_REFUSALS = (
     SELF_REVIEW_REFUSAL,
     "not permitted to approve",
     "cannot approve",
     "can not approve",
-    "review cannot be submitted",
 )
 
 

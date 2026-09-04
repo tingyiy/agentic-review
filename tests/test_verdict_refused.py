@@ -33,6 +33,9 @@ def _wire(monkeypatch, refusal_body):
 
 class TestTheFindingsSurviveARefusedVerdict:
     @pytest.mark.parametrize("refusal", [
+        # The real App response: the generic wrapper is IGNORED and the nested
+        # reason is what matches, so an unrelated 422 wearing the same wrapper
+        # cannot take this path.
         '{"message":"Review cannot be submitted","errors":['
         '"GitHub Apps are not permitted to approve pull requests"]}',
         '{"message":"Can not approve your own pull request"}',
@@ -54,6 +57,16 @@ class TestTheFindingsSurviveARefusedVerdict:
     def test_the_own_pr_wording_is_still_recognised(self, monkeypatch):
         _wire(monkeypatch, '{"message":"Can not approve your own pull request"}')
         assert "own PR" in pr.post_review("app", 1, "APPROVE", "body")
+
+    def test_the_generic_wrapper_alone_is_not_a_refusal(self, monkeypatch):
+        """`Review cannot be submitted` is GitHub's catch-all wrapper. Matching
+        it would downgrade a stale head or an over-long body to a comment —
+        the silent downgrade this guard exists to prevent. Copilot's finding
+        on the PR that added it."""
+        _wire(monkeypatch, '{"message":"Review cannot be submitted",'
+                           '"errors":["head sha can\'t be blank"]}')
+        with pytest.raises(urllib.error.HTTPError):
+            pr.post_review("app", 1, "REQUEST_CHANGES", "body")
 
     def test_an_unrelated_422_still_raises(self, monkeypatch):
         """422 is GitHub's catch-all. Swallowing every one of them downgraded a
