@@ -364,3 +364,42 @@ class TestWhichNamesTheCapSpendsItselfOn:
         out = ctx.cross_references("/w", diff, set(), run=lambda w, n: [long_path])
         rows = [l for l in out.splitlines() if l.startswith("- `")]
         assert sum(len(r) for r in rows) <= ctx.MAX_XREF_CHARS
+
+
+class TestFoundByOurOwnReviewerOnThisPR:
+    """This reviewer, run against the pull request that adds this feature."""
+
+    def test_the_eval_path_gets_the_skipped_paths_too(self, monkeypatch):
+        """Fixed in `main()` and not in the harness — the same divergence that
+        once made this whole section measure itself as absent."""
+        import json
+        import eval.compare as compare
+        from agentic_review import review
+
+        seen = {}
+        monkeypatch.setattr(review, "gh", lambda *a, **k: json.dumps(
+            {"head": {"sha": "a" * 40}, "title": "t", "body": "",
+             "user": {"login": "u"}}))
+        monkeypatch.setattr(compare, "_diff_at",
+                            lambda *a: ("--- a/x\n+++ b/x\n@@\n+x\n",
+                                        ["big.ts"], review._Skipped(["uv.lock"])))
+        monkeypatch.setattr(review, "checkout", lambda *a: None)
+        monkeypatch.setattr(review, "review_findings", lambda *a, **k: [])
+        monkeypatch.setattr(review, "_revise", lambda f, w, r: (f, []))
+        monkeypatch.setattr(review.checks, "run_all", lambda *a, **k: [])
+        monkeypatch.setattr(review, "commit_messages", lambda *a: [])
+
+        def spy(repo, pr, meta, work, changed, diff, excluded=()):
+            seen["paths"] = list(excluded)
+            return ""
+        monkeypatch.setattr(review, "build_context", spy)
+        compare.run_ours("app", 1)
+        assert seen["paths"] == ["big.ts", "uv.lock"]
+
+    def test_skipped_is_not_hashable(self):
+        """A mutable list that also compares equal to an int must not be a
+        dict key: `_Skipped([...])` and `2` would collide or not depending on
+        insertion order."""
+        from agentic_review.review import _Skipped
+        with pytest.raises(TypeError):
+            {_Skipped(["a.lock"]): 1}

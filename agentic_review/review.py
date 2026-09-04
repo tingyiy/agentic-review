@@ -102,8 +102,10 @@ class _Skipped(list):
             return len(self) == other
         return list.__eq__(self, other)
 
-    def __hash__(self):
-        return hash(tuple(self))
+    # NOT hashable, deliberately: it is a mutable list, and giving it a hash
+    # while `__eq__` also matches an int would put `_Skipped([...])` and `2`
+    # in a set as one key or two depending on the order they arrived.
+    __hash__ = None
 
 
 def pr_diff(repo, pr):

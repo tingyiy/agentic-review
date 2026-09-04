@@ -207,8 +207,15 @@ def run_ours(repo, pr, at=None):
         # `diff` is REQUIRED, and that is deliberate: it was optional, this
         # call omitted it, and the cross-reference section silently switched
         # itself off in the very harness that measures whether it helps.
+        # Every path the PR touches: shown, cut for budget, and skipped as
+        # generated. `excluded` alone leaves a changed lockfile looking
+        # untouched — and this harness diverging from `main()` is exactly how
+        # the cross-reference section once measured itself as absent.
+        # `skipped` counts as a number and carries the paths; a stub may hand
+        # over a bare int, so ask before iterating it (same guard as `main`).
+        skipped_paths = list(skipped) if isinstance(skipped, list) else []
         context = review.build_context(repo, pr, meta, work, changed, diff,
-                                       excluded)
+                                       list(excluded or []) + skipped_paths)
         prompt = review.PROMPT.format(
             repo=repo, path=work, diff=diff, caveats=caveats, context=context,
             # NOT the real conversation. Every one of these PRs already carries
