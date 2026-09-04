@@ -153,7 +153,7 @@ def _record_opened(stats, name, raw, result):
     # says so in a footer; counting that as "opened" would clear the caveat on
     # a 255-line file the agent had seen four fifths of, and let the review
     # approve on it. Only a read that reached the end counts.
-    if _PARTIAL_READ.search(text):
+    if _PARTIAL_READ.search(text) or _CLIPPED_RESULT.search(text):
         return
     try:
         path = (json.loads(raw or "{}") or {}).get("path")
@@ -347,10 +347,17 @@ TOOLS = [
 _DISPATCH = {"read_file": _read_file, "grep": _grep, "list_files": _list_files}
 
 
-#: `_read_file`'s footer when a window did not reach the end of the file. The
-#: footer is the only thing that distinguishes a partial read from a whole one,
-#: and this pairs with the code that writes it — change one, change both.
+#: `_read_file`'s footer when a window did not reach the end of the file, and
+#: `_truncate`'s note when the result itself was clipped. Both pair with the
+#: code that writes them — change one, change both.
+#:
+#: BOTH ARE NEEDED, and the second is the one that is easy to miss: the footer
+#: is APPENDED and `_truncate` keeps the HEAD, so a window whose numbered lines
+#: run past MAX_TOOL_CHARS loses the footer entirely. That is exactly the large
+#: file where a partial read matters, and checking the footer alone would have
+#: called it complete. A clipped result is not a complete read either way.
 _PARTIAL_READ = re.compile(r"\[showing lines \d+-\d+ of \d+\.")
+_CLIPPED_RESULT = re.compile(r"\[\.\.\. truncated: \d+ more chars\.")
 
 #: How `_call_tool` spells a failure. A tool result is a string either way, so
 #: anything reading results — `_record_opened`, for one — has to be able to

@@ -300,6 +300,34 @@ class TestTheThirdRoundFromOurOwnReviewer:
                              "Call again with offset=201 for the rest.]")
         assert stats.get("opened") is None
 
+    def test_a_clipped_result_is_not_an_opened_file(self):
+        """The footer is APPENDED and `_truncate` keeps the HEAD, so a window
+        whose numbered lines run past MAX_TOOL_CHARS loses the footer — the
+        large file where this matters most. A 🔴 from this reviewer on this
+        PR, against the fix in the commit before it."""
+        from agentic_review import agent
+        stats = {}
+        agent._record_opened(
+            stats, "read_file", '{"path": "huge.py"}',
+            "1\tx\n" * 50 + "\n\n[... truncated: 4211 more chars. "
+            "Narrow the pattern, or read a specific range with offset/limit.]")
+        assert stats.get("opened") is None
+
+    def test_a_real_clipped_read_of_a_real_file_is_not_counted(self, tmp_path):
+        """Driven through `_read_file` itself rather than a hand-written
+        string, so the two markers cannot drift from the code that writes
+        them."""
+        from agentic_review import agent
+        big = tmp_path / "wide.py"
+        big.write_text("".join(f"x = {'a' * 200}  # {i}\n" for i in range(400)))
+        ws = agent.Workspace(str(tmp_path))
+        result = agent._read_file(ws, "wide.py")
+        assert len(result) <= agent.MAX_TOOL_CHARS + 200
+        stats = {}
+        agent._record_opened(stats, "read_file", '{"path": "wide.py"}', result)
+        assert stats.get("opened") is None, (
+            "a clipped window is not a read of the file")
+
     def test_a_whole_read_still_counts(self):
         from agentic_review import agent
         stats = {}
