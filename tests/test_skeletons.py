@@ -414,3 +414,59 @@ class TestTheFifthRoundFromOurOwnReviewer:
         from agentic_review import review as pr
         assert pr._finalize_review([], [], excluded=["a.py"])[1] == "COMMENT"
         assert pr._finalize_review([], [], excluded=[])[1] == "APPROVE"
+
+
+class TestSequentialWindowsCoverTheFile:
+    """The normal way to read a 255-line file is two windows. Requiring one
+    top-to-end read reported a fully-read file as unopened — a FALSE caveat on
+    every large file, and the exact opposite of the failure the requirement
+    was added to prevent. Both are wrong; the ranges are unioned now."""
+
+    def _read(self, stats, path, result, offset=None):
+        import json
+        from agentic_review import agent
+        args = {"path": path}
+        if offset is not None:
+            args["offset"] = offset
+        agent._record_opened(stats, "read_file", json.dumps(args), result)
+
+    def test_two_windows_together_are_the_file(self):
+        stats = {}
+        self._read(stats, "big.py",
+                   "1\tx\n[showing lines 1-200 of 255. Call again with "
+                   "offset=201 for the rest.]")
+        assert stats.get("opened") is None, "one window is not the file"
+        self._read(stats, "big.py", "201\tx", offset=201)
+        assert stats["opened"] == {"big.py"}
+
+    def test_a_gap_in_the_middle_is_not_coverage(self):
+        stats = {}
+        self._read(stats, "g.py",
+                   "1\tx\n[showing lines 1-100 of 300. Call again with "
+                   "offset=101 for the rest.]")
+        self._read(stats, "g.py", "201\tx", offset=201)
+        assert stats.get("opened") is None, "lines 101-200 were never shown"
+
+    def test_overlapping_windows_still_count(self):
+        stats = {}
+        self._read(stats, "o.py",
+                   "1\tx\n[showing lines 1-200 of 255. Call again with "
+                   "offset=201 for the rest.]")
+        self._read(stats, "o.py", "150\tx", offset=150)
+        assert stats["opened"] == {"o.py"}
+
+    def test_the_tail_alone_is_still_not_the_file(self):
+        stats = {}
+        self._read(stats, "t.py", "800\tx", offset=800)
+        assert stats.get("opened") is None
+
+    def test_a_whole_small_file_in_one_read_still_counts(self):
+        stats = {}
+        self._read(stats, "s.py", "1\tdef a():\n2\t    pass")
+        assert stats["opened"] == {"s.py"}
+
+    def test_the_skeleton_docstring_matches_what_it_does(self):
+        """It said an unreadable file "is simply absent" after the code had
+        been changed to name it."""
+        assert "still NAMED" in ctx.skeletons.__doc__
+        assert "simply absent" not in ctx.skeletons.__doc__

@@ -131,48 +131,69 @@ class Workspace:
 
 
 def _record_opened(stats, name, raw, result):
-    """Note the path of a SUCCESSFUL `read_file`, for the caller's caveat.
+    """Track how much of a file `read_file` has actually shown, in `stats`.
 
-    Two things this gets wrong if it is careless, and both were found by
-    review:
+    A path counts as OPENED once the windows the agent asked for cover the
+    whole file. Four ways this has been got wrong, each found by review:
 
-      · recording before the call meant a read that FAILED — a path escaping
-        the checkout, a file that is not there — still counted as opened, so
-        the caveat would drop a file nobody had seen;
-      · recording the raw spelling meant `./src/big.py` never matched the
-        excluded `src/big.py`, and the caveat then said a file was not opened
-        when it had been.
+      · a read that FAILED still counted, so the caveat dropped a file
+        nobody had seen;
+      · the raw spelling was stored, so `./src/big.py` never matched
+        `src/big.py`;
+      · a 200-line WINDOW counted as the file, which let a 255-line file
+        clear the caveat after four fifths of it — and the footer that says
+        so is appended, so `_truncate` can cut it off;
+      · then the correction went too far: the normal way to read a 255-line
+        file is two windows, `read_file(p)` then `read_file(p, offset=201)`,
+        and neither one alone is the file. Requiring a single top-to-end read
+        made a fully-read file report as unopened, which is a FALSE caveat on
+        every large file — the opposite failure, and just as wrong.
 
-    Best-effort and silent otherwise: bookkeeping must never raise inside the
-    loop.
+    So the ranges are unioned. The footer names the total, which is what makes
+    "have we covered it all" answerable at all.
     """
     text = str(result or "")
     if name != "read_file" or text.startswith(TOOL_ERROR_PREFIX):
         return
-    # A WINDOW IS NOT THE FILE. `_read_file` returns 200 lines by default and
-    # says so in a footer; counting that as "opened" would clear the caveat on
-    # a 255-line file the agent had seen four fifths of, and let the review
-    # approve on it. Only a read that reached the end counts.
-    if _PARTIAL_READ.search(text) or _CLIPPED_RESULT.search(text):
+    # A CLIPPED RESULT SHOWS LESS THAN IT SAYS. `_truncate` keeps the head and
+    # drops the tail, footer included, so the window's own end is unknown.
+    if _CLIPPED_RESULT.search(text):
         return
     try:
         args = json.loads(raw or "{}") or {}
+        path = args.get("path")
+        offset = int(args.get("offset") or 1)
     except (ValueError, TypeError):
         return
-    path = args.get("path")
-    if not isinstance(path, str) or not path.strip():
+    if not isinstance(path, str) or not path.strip() or offset < 1:
         return
-    # AND IT HAS TO HAVE STARTED AT THE TOP. A window opened at `offset=800`
-    # of a 900-line file reaches the end, so it carries no partial-read
-    # footer — and lines 1-799 were never seen. Reaching EOF says where the
-    # read stopped, not where it began.
-    try:
-        offset = int(args.get("offset") or 1)
-    except (TypeError, ValueError):
+    path = os.path.normpath(path.strip())
+
+    seen = stats.setdefault("_read_ranges", {}).setdefault(
+        path, {"total": None, "covered": []})
+    window = _PARTIAL_READ.search(text)
+    if window:
+        start, end, total = (int(g) for g in window.groups())
+        seen["total"] = total
+        seen["covered"].append((start, end))
+    else:
+        # No footer: this window ran to the end of the file.
+        seen["covered"].append((offset, None))
+
+    total = seen["total"]
+    if total is None:
+        # Never partial and started at the top — the whole file in one read.
+        if any(start == 1 and end is None for start, end in seen["covered"]):
+            stats.setdefault("opened", set()).add(path)
         return
-    if offset > 1:
-        return
-    stats.setdefault("opened", set()).add(os.path.normpath(path.strip()))
+    reach = 0
+    for start, end in sorted((s, e if e is not None else total)
+                             for s, e in seen["covered"]):
+        if start > reach + 1:
+            return                      # a gap: something in the middle is unseen
+        reach = max(reach, end)
+    if reach >= total:
+        stats.setdefault("opened", set()).add(path)
 
 
 def _truncate(text, limit=MAX_TOOL_CHARS):
@@ -367,7 +388,7 @@ _DISPATCH = {"read_file": _read_file, "grep": _grep, "list_files": _list_files}
 #: run past MAX_TOOL_CHARS loses the footer entirely. That is exactly the large
 #: file where a partial read matters, and checking the footer alone would have
 #: called it complete. A clipped result is not a complete read either way.
-_PARTIAL_READ = re.compile(r"\[showing lines \d+-\d+ of \d+\.")
+_PARTIAL_READ = re.compile(r"\[showing lines (\d+)-(\d+) of (\d+)\.")
 _CLIPPED_RESULT = re.compile(r"\[\.\.\. truncated: \d+ more chars\.")
 
 #: How `_call_tool` spells a failure. A tool result is a string either way, so

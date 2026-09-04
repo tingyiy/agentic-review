@@ -578,8 +578,11 @@ def file_skeleton(work, path, max_decls=MAX_SKELETON_DECLS):
 def skeletons(work, paths):
     """The shape of every file the diff had no room for.
 
-    Never raises, and never claims to be complete: a file that cannot be read
-    is simply absent, which is the same outcome as before this existed.
+    Never raises. A file whose shape cannot be read — deleted by this change,
+    a symlink out of the checkout, a device — is still NAMED, with its shape
+    reported as unavailable: the caveat this replaced listed every excluded
+    file, and dropping the unreadable ones would be a regression in coverage
+    for exactly the files worth asking about.
     """
     wanted = list(paths or [])
     rows, used, dropped = [], 0, max(0, len(wanted) - MAX_SKELETON_FILES)
