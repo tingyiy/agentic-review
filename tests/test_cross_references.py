@@ -218,3 +218,32 @@ class TestTheSecondRoundOfReviewFindings:
             also_changed=["big.ts"]) == ""
         assert "big.ts" in ctx.cross_references(
             "/w", diff, {"a.ts"}, run=lambda w, n: ["big.ts"])
+
+
+class TestClassNamesAssembledByConcatenation:
+    """Verified against the real diff this feature was built for, not against
+    a fixture I wrote to match my own regex.
+
+    `row.className = "prog" + (on ? " prog--cpsa" : " prog--off")` hides the
+    class behind two things at once: the literal carries a LEADING SPACE so it
+    can be joined, and BEM's `--` is two separators in a row. Either alone made
+    the class invisible, and the class in question is the one behind a defect
+    this reviewer had missed three runs in a row.
+    """
+
+    @pytest.mark.parametrize("added,expected", [
+        ('+  row.className = "prog" + (on ? " prog--cpsa" : " prog--off");', "prog--cpsa"),
+        ('+  row.className = "prog" + (on ? " prog--cpsa" : " prog--off");', "prog--off"),
+        ("+  el.className = ' wallet-card ';", "wallet-card"),
+        ('+  const cls = "side--panel--open";', "side--panel--open"),
+        ('+  cls = "plain_snake_key";', "plain_snake_key"),
+    ])
+    def test_the_name_is_still_found(self, added, expected):
+        assert expected in ctx.xref_names(added)
+
+    def test_a_bare_word_in_quotes_is_still_not_a_name(self):
+        """The separator is what makes a quoted word look like a key or a
+        class rather than ordinary prose. (`msg` itself IS extracted — by the
+        const-definition pattern, which is a different question.)"""
+        assert "hello" not in ctx.xref_names('+  const msg = "hello";')
+        assert ctx.xref_names('+  return "hello";') == []

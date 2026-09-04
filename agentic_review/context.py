@@ -306,12 +306,17 @@ _XREF_PATTERNS = (
     # primary use case and a `{`-or-`,`-only pattern missed most of them.
     re.compile(r"^\s*\.([a-zA-Z][\w-]{2,})(?=[\s,{:.>+~\[])"),
     re.compile(r"""class(?:Name)?\s*=\s*\{?\s*["']([^"'}]{3,80})["']"""),
+    # A class assembled by concatenation: `"prog" + (on ? " prog--cpsa" : "")`.
+    # Two traps, both real, both from the very PR this feature was built for:
+    # the literal carries a LEADING SPACE for joining, and BEM's `--` is two
+    # separators in a row. Either one alone made the class invisible.
+    re.compile(r"""["']\s*([a-z][a-z0-9]*(?:[_-]+[a-z0-9]+)+)\s*["']"""),
     re.compile(r"""classList\.(?:add|remove|toggle)\(\s*["']([\w-]{3,})["']"""),
     # A key or status value the change reads or writes, as a quoted literal
     # used with a subscript or a comparison.
     re.compile(r"""\[\s*["']([a-z][\w.-]{2,})["']\s*\]"""),
     re.compile(r"""(?:==|===|!=|!==|\bis\b|\bin\b)\s*["']([a-z][\w.-]{2,})["']"""),
-    re.compile(r"""["']([a-z][a-z0-9]*(?:[_-][a-z0-9]+){1,})["']"""),
+    re.compile(r"""["']([a-z][a-z0-9]*(?:[_-]+[a-z0-9]+)+)["']"""),
     # A definition the change introduces.
     re.compile(r"^\s*(?:async\s+)?def\s+(\w{3,})"),
     re.compile(r"^\s*class\s+(\w{3,})"),
