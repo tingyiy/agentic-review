@@ -86,7 +86,38 @@ class TestTheSection:
     def test_the_number_of_names_is_capped(self):
         diff = "".join(f"+const name_{i}_x = 1;\n" for i in range(40))
         out = ctx.cross_references("/w", diff, set(), run=lambda w, n: ["a.ts"])
-        assert out.count("\n- ") <= ctx.MAX_XREF_NAMES
+        assert out.count("` also in:") <= ctx.MAX_XREF_NAMES
+
+    def test_the_cap_bounds_the_SEARCHES_not_just_the_rows(self):
+        """A name with no outside hit produces no row, so a row-only cap let a
+        large diff spend one subprocess per extracted name. Copilot's finding
+        on the PR that added this."""
+        diff = "".join(f"+const name_{i}_x = 1;\n" for i in range(40))
+        searched = []
+        ctx.cross_references("/w", diff, set(),
+                             run=lambda w, n: searched.append(n) or [])
+        assert len(searched) <= ctx.MAX_XREF_NAMES
+
+    def test_a_cut_list_says_it_was_cut(self):
+        diff = "".join(f"+const name_{i}_x = 1;\n" for i in range(40))
+        out = ctx.cross_references("/w", diff, set(), run=lambda w, n: ["a.ts"])
+        assert "list cut for length" in out and "grep -rl" in out
+
+    def test_dropped_files_are_counted_not_hidden(self):
+        """This module's own rule: a truncation says so, or the list reads as
+        exhaustive and the model stops looking."""
+        out = ctx.cross_references(
+            "/w", "+const KEY = 'caeli_visitor_id';\n", set(),
+            run=lambda w, n: [f"f{i}.ts" for i in range(9)])
+        assert "+5 more" in out and "grep -rl caeli_visitor_id" in out
+
+    def test_the_character_budget_bounds_the_finished_section(self):
+        """Checked after the row is built: a repository path can be long, and a
+        budget tested only beforehand is one the last row walks past."""
+        diff = "".join(f"+const name_{i}_x = 1;\n" for i in range(12))
+        long_path = "a/" + "b" * 300 + ".ts"
+        out = ctx.cross_references("/w", diff, set(), run=lambda w, n: [long_path])
+        assert len(out) < ctx.MAX_XREF_CHARS + 600
 
     def test_the_files_per_name_are_capped(self):
         out = ctx.cross_references(
@@ -102,6 +133,22 @@ class TestTheSection:
 
     def test_an_empty_diff_is_silent(self):
         assert ctx.cross_references("/w", "", set(), run=lambda w, n: ["a.ts"]) == ""
+
+
+class TestTheEvalPathUsesIt:
+    def test_build_context_requires_the_diff(self):
+        """It was optional, `eval/compare.py` omitted it, and the section
+        silently switched itself off in the harness that measures whether it
+        helps — so the first measurement of this feature measured nothing."""
+        import inspect
+        from agentic_review import review
+        sig = inspect.signature(review.build_context)
+        assert sig.parameters["diff"].default is inspect.Parameter.empty
+
+    def test_the_eval_harness_passes_it(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "eval/compare.py").read_text()
+        assert "build_context(repo, pr, meta, work, changed, diff)" in src
 
 
 class TestItIsInTheContextBlock:

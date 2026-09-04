@@ -278,6 +278,10 @@ def build(work, changed_paths, tracker_section="", linked_section="",
 
 #: How many names are worth chasing, and how many mentions each. Both small:
 #: this is a pointer list, and a long one is skimmed rather than read.
+#:
+#: The name cap bounds the SEARCHES, not the rows: a name with no outside hit
+#: produces no row, so capping rows alone let a large diff spend one 20-second
+#: subprocess per extracted name while still advertising a 12-name bound.
 MAX_XREF_NAMES = 12
 MAX_XREF_FILES = 4
 MAX_XREF_CHARS = 2_400
@@ -298,7 +302,7 @@ _XREF_PATTERNS = (
     # A CSS class the change declares or applies: `.prog--cpsa {`, `class="x"`,
     # `classList.add('x')`, `className={'x'}`.
     re.compile(r"^\s*\.([a-zA-Z][\w-]{2,})\s*[,{]"),
-    re.compile(r"""class(?:Name)?\s*=\s*["'{]([^"'}]{3,80})["'}]"""),
+    re.compile(r"""class(?:Name)?\s*=\s*\{?\s*["']([^"'}]{3,80})["']"""),
     re.compile(r"""classList\.(?:add|remove|toggle)\(\s*["']([\w-]{3,})["']"""),
     # A key or status value the change reads or writes, as a quoted literal
     # used with a subscript or a comparison.
@@ -342,29 +346,42 @@ def cross_references(work, diff, changed_paths, run=None):
     Never raises: every grep is best-effort, and a review without this section
     is the review we shipped for weeks.
     """
-    names = xref_names(diff)
+    names = xref_names(diff)[:MAX_XREF_NAMES]
     if not names:
         return ""
     changed = set(changed_paths or ())
     runner = run or _git_grep_files
-    rows, used = [], 0
+    rows, used, dropped = [], 0, 0
     for name in names:
-        if len(rows) >= MAX_XREF_NAMES or used >= MAX_XREF_CHARS:
-            break
         try:
             hits = runner(work, name)
         except Exception:  # noqa: BLE001 — a pointer list is never worth a review
             continue
         # Only mentions the diff does NOT already show. A name that lives
         # entirely inside the change is not a second consumer.
-        elsewhere = [h for h in hits if h not in changed][:MAX_XREF_FILES]
-        if not elsewhere:
+        outside = [h for h in hits if h not in changed]
+        if not outside:
             continue
+        elsewhere = outside[:MAX_XREF_FILES]
         row = f"- `{name}` also in: " + ", ".join(elsewhere)
+        # SAY WHAT WAS CUT. This module's own rule: every truncation says so in
+        # the text the model reads, or the list reads as exhaustive and the
+        # model stops looking. `grep` is the recovery, and it has grep.
+        if len(outside) > len(elsewhere):
+            row += (f" (+{len(outside) - len(elsewhere)} more — "
+                    f"`grep -rl {name}` for the rest)")
+        # Checked AFTER building the row: a repository path can be long, and a
+        # budget tested only beforehand is a budget the last row walks past.
+        if used + len(row) > MAX_XREF_CHARS:
+            dropped += 1
+            break
         rows.append(row)
         used += len(row)
     if not rows:
         return ""
+    if dropped or len(xref_names(diff)) > len(names):
+        rows.append(f"- (list cut for length — `grep -rl <name>` for any other "
+                    f"name this change touches)")
     return ("\nWHERE ELSE THESE NAMES APPEAR. Each name below is introduced or\n"
             "handled by this change AND occurs in files the change does not\n"
             "touch. That second occurrence is the question: is it another\n"

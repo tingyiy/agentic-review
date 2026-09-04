@@ -482,7 +482,7 @@ def commit_messages(repo, pr):
         return []
 
 
-def build_context(repo, pr, meta, work, changed, diff=""):
+def build_context(repo, pr, meta, work, changed, diff):
     """Everything the reviewer is TOLD, as opposed to what it can go and find.
 
     The order is deliberate and it is the order a human would read in: the
