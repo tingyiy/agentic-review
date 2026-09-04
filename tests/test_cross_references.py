@@ -288,3 +288,51 @@ class TestEverySelectorClassAndNoGeneratedFiles:
             "/w", "+const the_key = 1;\n", set(),
             run=lambda w, n: ["package-lock.json", "src/real.ts"])
         assert "src/real.ts" in out and "package-lock" not in out
+
+
+class TestSkippedFilesAreKnownToBeChanged:
+    """`pr_diff` drops generated and binary files. It used to keep only a
+    COUNT, so a changed `uv.lock` or `.snap` was in neither `changed` nor
+    `excluded` and this section advertised it as a file the PR does not touch —
+    which reads as an un-updated consumer. A heuristic list of generated-looking
+    paths was the first fix and it DRIFTED: `pr_diff` skips `uv.lock`,
+    `bun.lockb`, `.snap`, `.webp`, `.onnx`, `.wasm` and `/.output/`, none of
+    which the heuristic knew. So the real paths are carried instead.
+    """
+
+    def test_pr_diff_reports_the_paths_it_skipped(self, monkeypatch):
+        from agentic_review import review as pr
+        blob = ("diff --git a/uv.lock b/uv.lock\n--- a/uv.lock\n"
+                "+++ b/uv.lock\n@@\n+x\n")
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: blob)
+        _, _, skipped = pr.pr_diff("repo", 1)
+        assert list(skipped) == ["uv.lock"]
+
+    def test_the_third_value_still_counts_and_formats_as_a_number(self, monkeypatch):
+        """Three call sites read it as an int, including the posted review's
+        'N generated/binary files skipped'."""
+        from agentic_review import review as pr
+        blob = "".join(
+            f"diff --git a/{n} b/{n}\n--- a/{n}\n+++ b/{n}\n@@\n+x\n"
+            for n in ("a.snap", "b.webp"))
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: blob)
+        _, _, skipped = pr.pr_diff("repo", 1)
+        assert skipped == 2
+        assert f"{skipped} generated/binary files skipped" == (
+            "2 generated/binary files skipped")
+
+    def test_an_empty_skip_list_is_falsy_and_zero(self, monkeypatch):
+        from agentic_review import review as pr
+        blob = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@\n+x\n"
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: blob)
+        _, _, skipped = pr.pr_diff("repo", 1)
+        assert not skipped and skipped == 0
+
+    @pytest.mark.parametrize("path", ["uv.lock", "bun.lockb", "a/b.snap",
+                                      "img.webp", "m.onnx", "x.wasm"])
+    def test_the_paths_the_heuristic_would_have_missed(self, path):
+        """Each of these is skipped by `pr_diff` and unknown to `_GENERATED`;
+        passed through `also_changed`, none is called untouched."""
+        assert ctx.cross_references(
+            "/w", "+const the_key = 1;\n", set(),
+            run=lambda w, n: [path], also_changed=[path]) == ""
