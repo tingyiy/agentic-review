@@ -89,6 +89,67 @@ class TestItNamesWhatIsNew:
         assert out.count("(modified)") == pr.MAX_SINCE_PATHS
 
 
+class TestTheWordingIsHonest:
+    def test_it_does_not_claim_the_rest_was_reviewed(self, monkeypatch):
+        """A partial review leaves changed files unopened and says so in its
+        own caveat. "Everything else you have already reviewed" would
+        contradict that warning on the very next round."""
+        _wire(monkeypatch,
+              [{"user": {"login": "bot"}, "submitted_at": "2026-01-01T00:00:00Z",
+                "body": REVIEWED}],
+              [{"filename": "c.ts", "status": "added"}])
+        out = pr.changed_since_last_review("repo", 1, "b" * 40, ["c.ts"])
+        assert "already present at that review" in out
+        assert "already reviewed" not in out
+
+    def test_a_compare_at_the_api_cap_stops_saying_only(self, monkeypatch):
+        """GitHub's compare caps `files` at 300 with no flag saying it did.
+        "the only parts that have moved" would then point the reviewer AWAY
+        from real new work."""
+        files = [{"filename": f"f{i:04d}.ts", "status": "modified"}
+                 for i in range(pr.COMPARE_FILE_CAP)]
+        _wire(monkeypatch,
+              [{"user": {"login": "bot"}, "submitted_at": "2026-01-01T00:00:00Z",
+                "body": REVIEWED}],
+              files)
+        out = pr.changed_since_last_review(
+            "repo", 1, "b" * 40, [f["filename"] for f in files])
+        assert "AT LEAST" in out and "the only parts" not in out
+
+    def test_below_the_cap_it_still_says_only(self, monkeypatch):
+        files = [{"filename": f"f{i:04d}.ts", "status": "modified"}
+                 for i in range(pr.COMPARE_FILE_CAP - 1)]
+        _wire(monkeypatch,
+              [{"user": {"login": "bot"}, "submitted_at": "2026-01-01T00:00:00Z",
+                "body": REVIEWED}],
+              files)
+        out = pr.changed_since_last_review(
+            "repo", 1, "b" * 40, [f["filename"] for f in files])
+        assert "the only parts" in out and "AT LEAST" not in out
+
+
+class TestADeletedFileIsAChange:
+    def test_diff_paths_with_deletions_keeps_the_removed_file(self):
+        """`_diff_paths` reads `+++ b/` only, and a deletion's is `/dev/null`
+        — so intersecting against it drops every removal silently."""
+        diff = ("diff --git a/gone.ts b/gone.ts\n--- a/gone.ts\n+++ /dev/null\n"
+                "diff --git a/kept.ts b/kept.ts\n--- a/kept.ts\n+++ b/kept.ts\n")
+        assert pr._diff_paths(diff) == {"kept.ts"}
+        assert pr._diff_paths_with_deletions(diff) == {"gone.ts", "kept.ts"}
+
+    def test_a_new_file_has_no_a_side_to_confuse_it(self):
+        diff = "diff --git a/new.ts b/new.ts\n--- /dev/null\n+++ b/new.ts\n"
+        assert pr._diff_paths_with_deletions(diff) == {"new.ts"}
+
+    def test_a_file_removed_since_the_last_review_is_listed(self, monkeypatch):
+        _wire(monkeypatch,
+              [{"user": {"login": "bot"}, "submitted_at": "2026-01-01T00:00:00Z",
+                "body": REVIEWED}],
+              [{"filename": "gone.ts", "status": "removed"}])
+        out = pr.changed_since_last_review("repo", 1, "b" * 40, ["gone.ts"])
+        assert "`gone.ts` (removed)" in out
+
+
 class TestWhichShaItComparesFrom:
     def test_the_body_wins_over_commit_id(self, monkeypatch):
         """GitHub stamps `commit_id` with the head at POST time, so a push that
@@ -122,6 +183,37 @@ class TestWhichShaItComparesFrom:
         pr.changed_since_last_review("repo", 1, "b" * 40, ["c.ts"])
         assert "c" * 40 in [c for c in calls if "/compare/" in c][0]
 
+    def test_the_footer_wins_over_a_finding_that_quotes_it(self, monkeypatch):
+        """The footer is the LAST line of the body and the findings are above
+        it — and a finding may quote the phrase, as one on this very PR did."""
+        calls = _wire(monkeypatch,
+                      [{"user": {"login": "bot"},
+                        "submitted_at": "2026-01-01T00:00:00Z",
+                        "body": "a finding quoting It read `9999999` in its "
+                                "detail\n\n_Automated review. It read `aaaaaaa`._"}],
+                      [{"filename": "c.ts", "status": "added"}])
+        pr.changed_since_last_review("repo", 1, "b" * 40, ["c.ts"])
+        assert "aaaaaaa..." in [c for c in calls if "/compare/" in c][0]
+
+    def test_a_review_past_the_first_page_is_still_ours(self, monkeypatch):
+        """These endpoints return OLDEST first, so the newest review — the one
+        this anchors on — is on the LAST page. `per_page=100` is a ceiling."""
+        page1 = [{"user": {"login": "bot"}, "submitted_at": "2026-01-01T00:00:00Z",
+                  "body": "It read `1111111`."}] * 100
+        page2 = [{"user": {"login": "bot"}, "submitted_at": "2026-02-01T00:00:00Z",
+                  "body": "It read `2222222`."}]
+        calls = []
+
+        def gh(path, method="GET", body=None, accept=""):
+            calls.append(path)
+            if "/reviews" in path:
+                return json.dumps(page1 if "&page=1" in path else page2)
+            return json.dumps({"files": [{"filename": "c.ts", "status": "added"}]})
+        monkeypatch.setattr(pr, "gh", gh)
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        pr.changed_since_last_review("repo", 1, "b" * 40, ["c.ts"])
+        assert "2222222..." in [c for c in calls if "/compare/" in c][0]
+
     def test_the_newest_of_our_reviews_is_the_anchor(self, monkeypatch):
         calls = _wire(monkeypatch, [
             {"user": {"login": "bot"}, "submitted_at": "2026-01-01T00:00:00Z",
@@ -145,6 +237,25 @@ class TestWhichShaItComparesFrom:
         assert not [c for c in calls if "/compare/" in c]
 
 
+class TestItDoesNotRefetchWhatMainAlreadyHas:
+    def test_reviews_handed_in_are_not_fetched_again(self, monkeypatch):
+        """`main` reads this endpoint for the nothing-new guard minutes
+        earlier; asking twice is two round-trips for identical data."""
+        calls = []
+
+        def gh(path, method="GET", body=None, accept=""):
+            calls.append(path)
+            return json.dumps({"files": [{"filename": "c.ts", "status": "added"}]})
+        monkeypatch.setattr(pr, "gh", gh)
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        out = pr.changed_since_last_review(
+            "repo", 1, "b" * 40, ["c.ts"],
+            revs=[{"user": {"login": "bot"},
+                   "submitted_at": "2026-01-01T00:00:00Z", "body": REVIEWED}])
+        assert "`c.ts` (added)" in out
+        assert not [c for c in calls if "/reviews" in c]
+
+
 class TestWhenThereIsNothingToSay:
     def test_a_first_review_has_no_since(self, monkeypatch):
         calls = _wire(monkeypatch, [], [])
@@ -159,6 +270,20 @@ class TestWhenThereIsNothingToSay:
                         "body": "It read `aaaaaaa`."}], [])
         assert pr.changed_since_last_review("repo", 1, "a" * 40, ["a.ts"]) == ""
         assert not [c for c in calls if "/compare/" in c]
+
+    def test_a_null_payload_is_not_fatal(self, monkeypatch):
+        """`main` calls this inline. A shape surprise anywhere in the parsing
+        would abort a whole review to save a line of prompt."""
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        monkeypatch.setattr(pr, "gh", lambda path, **kw: json.dumps(None))
+        assert pr.changed_since_last_review("repo", 1, "b" * 40, ["a.ts"]) == ""
+
+    def test_a_truthy_non_object_user_is_not_fatal(self, monkeypatch):
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        monkeypatch.setattr(pr, "gh", lambda path, **kw: json.dumps(
+            [{"user": "octocat", "submitted_at": "2026-01-01T00:00:00Z",
+              "body": REVIEWED}]))
+        assert pr.changed_since_last_review("repo", 1, "b" * 40, ["a.ts"]) == ""
 
     @pytest.mark.parametrize("failing", ["/reviews", "/compare/"])
     def test_it_never_raises_when_github_does(self, monkeypatch, failing):
@@ -190,3 +315,74 @@ class TestWhenThereIsNothingToSay:
                 "body": REVIEWED}],
               ["c.ts"])
         assert pr.changed_since_last_review("repo", 1, "b" * 40, ["c.ts"]) == ""
+
+
+class TestTheWiringInMain:
+    """The helper was tested and the call site was not — the gap this repo's
+    own reviewer named on the PR that added it, and the one the rules call
+    'a test that calls below the change'."""
+
+    DELETION = ("diff --git a/gone.ts b/gone.ts\n--- a/gone.ts\n"
+                "+++ /dev/null\n@@\n-x\n")
+
+    def _prompt(self, monkeypatch, reviews, files, diff=None):
+        seen = {}
+
+        def gh(path, method="GET", body=None, accept=""):
+            if "/compare/" in path:
+                return json.dumps({"files": files})
+            if "/reviews" in path:
+                return json.dumps(reviews)
+            if path.endswith("/pulls/7"):
+                return json.dumps(
+                    {"draft": False, "state": "open", "merged": False,
+                     "title": "SCRUM-1 x", "user": {"login": "someone"},
+                     "head": {"sha": "b" * 40}})
+            return json.dumps([])
+
+        monkeypatch.setattr(pr, "gh", gh)
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        monkeypatch.setattr(pr, "pr_diff", lambda *a: (
+            diff or "diff --git a/c.ts b/c.ts\n--- a/c.ts\n+++ b/c.ts\n@@\n+x\n",
+            False, 0))
+        monkeypatch.setattr(pr, "_already_reviewed", lambda *a, **k: "")
+        monkeypatch.setattr(pr, "conversation", lambda *a: "")
+        monkeypatch.setattr(pr, "build_context", lambda *a: "")
+        monkeypatch.setattr(pr, "commit_messages", lambda *a: [])
+        monkeypatch.setattr(pr, "checkout", lambda *a: None)
+        monkeypatch.setattr(pr.ctx, "expand_hunks", lambda d, w, **k: d)
+        monkeypatch.setattr(pr, "_revise", lambda f, w, r: (f, []))
+        monkeypatch.setattr(pr.checks, "run_all", lambda *a, **k: [])
+        monkeypatch.setattr(pr, "post_review", lambda *a, **k: "APPROVE")
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(
+            pr, "review_findings",
+            lambda prompt, work, repo="": seen.setdefault("prompt", prompt) and [])
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+        return seen.get("prompt", "")
+
+    def test_the_block_reaches_the_model(self, monkeypatch):
+        prompt = self._prompt(
+            monkeypatch,
+            [{"user": {"login": "bot"}, "submitted_at": "2026-01-01T00:00:00Z",
+              "body": REVIEWED}],
+            [{"filename": "c.ts", "status": "modified"}])
+        assert "NEW SINCE YOUR LAST REVIEW at `aaaaaaa`" in prompt
+        assert "`c.ts` (modified)" in prompt
+
+    def test_a_first_review_carries_no_block(self, monkeypatch):
+        prompt = self._prompt(monkeypatch, [], [])
+        assert "NEW SINCE YOUR LAST REVIEW" not in prompt
+
+    def test_a_deletion_only_push_still_gets_a_block(self, monkeypatch):
+        """`_diff_paths` reads `+++ b/` alone, so intersecting against it drops
+        every removal — and an all-deletion round would get no block at all."""
+        prompt = self._prompt(
+            monkeypatch,
+            [{"user": {"login": "bot"}, "submitted_at": "2026-01-01T00:00:00Z",
+              "body": REVIEWED}],
+            [{"filename": "gone.ts", "status": "removed"}],
+            diff=self.DELETION)
+        assert "`gone.ts` (removed)" in prompt

@@ -399,13 +399,16 @@ def conversation(repo, pr):
         # default of 30 because "they never exceed it" — but the default returns
         # the OLDEST 30, so the failure is silent and lands exactly on a
         # contested PR, where the rebuttal is comment 31.
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/reviews?per_page=100", "review", 1200),
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/comments?per_page=100", "inline", 800),
-        (f"/repos/{ORG}/{repo}/issues/{pr}/comments?per_page=100", "comment", 800),
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/commits?per_page=100", "commit", 1500),
+        # PAGED, not merely `per_page=100`: these return OLDEST first, so on a
+        # contested PR the rebuttal this block exists to show is on the LAST
+        # page. Raising 30 to 100 moved that cliff rather than removing it.
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/reviews", "review", 1200),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/comments", "inline", 800),
+        (f"/repos/{ORG}/{repo}/issues/{pr}/comments", "comment", 800),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/commits", "commit", 1500),
     ):
         try:
-            for c in json.loads(gh(path)):
+            for c in _paged(path):
                 if kind == "commit":
                     # A commit is shaped differently: the prose is under
                     # `commit.message`, and the author is the committer rather
@@ -480,6 +483,42 @@ def conversation(repo, pr):
             + "\n\n".join(out) + "\n")
 
 
+#: A fuse against a pathological thread, not a budget: 20 pages is 2,000 items.
+MAX_PAGES = 20
+
+
+def _paged(path, page_cap=MAX_PAGES):
+    """Every item of a list endpoint, oldest first. Raises what `gh` raises.
+
+    `per_page=100` IS A CEILING, NOT PAGINATION — the mistake this file has
+    made twice. GitHub returns these lists OLDEST first, so the newest item,
+    which is the one every caller here actually wants, is on the LAST page. A
+    PR with 101 reviews fails exactly as one with 31 did before the ceiling was
+    raised. A short page means the end.
+    """
+    sep = "&" if "?" in path else "?"
+    out = []
+    for page in range(1, page_cap + 1):
+        items = json.loads(gh(f"{path}{sep}per_page=100&page={page}"))
+        if not isinstance(items, list):
+            break
+        out.extend(items)
+        if len(items) < 100:
+            break
+    return out
+
+
+def _reviews(repo, pr):
+    """Every review on the PR. Never raises; unreadable is indistinguishable
+    from none, and both callers treat the two the same way — one reviews, the
+    other stays quiet."""
+    try:
+        return _paged(f"/repos/{ORG}/{repo}/pulls/{pr}/reviews")
+    except Exception as e:  # noqa: BLE001 — unanswerable means "review it"
+        print(f"[pr-review] could not read prior reviews ({type(e).__name__})")
+        return []
+
+
 #: The sha a past review says it READ, recovered from its own body.
 #:
 #: NOT `commit_id`: GitHub stamps that with the head at POST time, so a push
@@ -496,15 +535,28 @@ MAX_SINCE_PATHS = 40
 
 
 def _last_review_read(mine):
-    """The sha the most recent of our own reviews looked at, or ""."""
+    """The sha the most recent of our own reviews looked at, or "".
+
+    THE LAST MATCH, not the first. The footer that carries this is the last
+    line of the body, and everything above it is findings — a finding that
+    quotes the phrase (this file now contains it) would otherwise anchor the
+    comparison at whatever sha it quoted.
+    """
     if not mine:
         return ""
     last = max(mine, key=lambda r: r.get("submitted_at") or "")
-    m = _READ_AT.search(last.get("body") or "")
-    return m.group(1) if m else (last.get("commit_id") or "")
+    found = _READ_AT.findall(last.get("body") or "")
+    return found[-1] if found else (last.get("commit_id") or "")
 
 
-def changed_since_last_review(repo, pr, head_sha, pr_paths):
+#: GitHub's compare endpoint returns at most this many files, with no flag
+#: saying it truncated. At the cap the list is no longer "the only parts that
+#: moved", and a prompt that says it is points the reviewer AWAY from real new
+#: work — so the wording changes instead of the list being trusted.
+COMPARE_FILE_CAP = 300
+
+
+def changed_since_last_review(repo, pr, head_sha, pr_paths, revs=None):
     """Which of this PR's files have moved since we last looked. Never raises.
 
     THE DIFF IS ALWAYS THE WHOLE PULL REQUEST. Round two is handed A, B, C and
@@ -522,25 +574,30 @@ def changed_since_last_review(repo, pr, head_sha, pr_paths):
     merged main — those files really did change in the tree, and they are
     nobody's new work. The PR diff is `merge-base(base, head)..head`, so they
     are absent from it, and intersecting removes exactly that noise.
+
+    NOTHING HERE MAY RAISE. It is context, and `main` calls it inline: a shape
+    surprise anywhere in the parsing — a null payload, a truthy non-object
+    `user`, a `files` value that is not a list — would abort a whole review to
+    save a line of prompt.
     """
     try:
-        revs = json.loads(gh(f"/repos/{ORG}/{repo}/pulls/{pr}/reviews?per_page=100"))
+        return _since_note(repo, pr, head_sha, pr_paths, revs)
     except Exception as e:  # noqa: BLE001 — context, never a reason to stop
-        print(f"[pr-review] could not read prior reviews for the since-list: "
-              f"{type(e).__name__}")
+        print(f"[pr-review] could not build the since-list "
+              f"({type(e).__name__}: {e}) — reviewing without it")
         return ""
+
+
+def _since_note(repo, pr, head_sha, pr_paths, revs=None):
     me = _me()
-    # `isinstance` BEFORE `.get`: this is context, and context may not kill a
-    # review. A payload that is not a list of objects — an error body, a stub,
-    # a future API shape — used to raise an AttributeError out of here, past
-    # the narrow `except` around the fetch, and take the whole run with it.
-    mine = [r for r in revs
+    revs = _reviews(repo, pr) if revs is None else revs
+    mine = [r for r in (revs or [])
             if isinstance(r, dict)
             and (r.get("user") or {}).get("login") == me] if me else []
     old = _last_review_read(mine)
     # A first review has no "since", and an abbreviated sha that prefixes the
     # head means the last review read this very commit.
-    if not old or (head_sha or "").startswith(old):
+    if not old or not isinstance(old, str) or (head_sha or "").startswith(old):
         return ""
     try:
         cmp_ = json.loads(gh(f"/repos/{ORG}/{repo}/compare/{old}...{head_sha}"))
@@ -548,13 +605,14 @@ def changed_since_last_review(repo, pr, head_sha, pr_paths):
         print(f"[pr-review] could not compare {old[:7]}..{(head_sha or '')[:7]} "
               f"({type(e).__name__}) — reviewing without a since-list")
         return ""
-    want = {os.path.normpath(p) for p in (pr_paths or []) if p}
+    files = (cmp_.get("files") if isinstance(cmp_, dict) else None) or []
+    want = {os.path.normpath(p) for p in (pr_paths or []) if isinstance(p, str) and p}
     rows = []
-    for f in (cmp_.get("files") if isinstance(cmp_, dict) else None) or []:
+    for f in files:
         if not isinstance(f, dict):
             continue
         name = f.get("filename") or ""
-        if name and os.path.normpath(name) in want:
+        if isinstance(name, str) and name and os.path.normpath(name) in want:
             rows.append((name, f.get("status") or "changed"))
     if not rows:
         return ""
@@ -562,14 +620,24 @@ def changed_since_last_review(repo, pr, head_sha, pr_paths):
     shown = ", ".join(f"`{n}` ({s})" for n, s in rows[:MAX_SINCE_PATHS])
     if len(rows) > MAX_SINCE_PATHS:
         shown += f", and {len(rows) - MAX_SINCE_PATHS} more"
-    print(f"  since `{old[:7]}`: {len(rows)} of this PR's file(s) changed",
-          flush=True)
+    # AT THE CAP, THE LIST IS NOT THE WHOLE ANSWER and must not claim to be.
+    partial = len(files) >= COMPARE_FILE_CAP
+    lead = ("these are AT LEAST the parts of it that have moved since you\n"
+            "last looked (GitHub stops listing at "
+            f"{COMPARE_FILE_CAP} files, and this comparison hit that\nlimit): "
+            if partial else
+            "these are the only parts of it that have moved since you\n"
+            "last looked: ")
+    print(f"  since `{old[:7]}`: {len(rows)} of this PR's file(s) changed"
+          + (" (compare list truncated)" if partial else ""), flush=True)
+    # "ALREADY PRESENT", NOT "ALREADY REVIEWED": a partial review leaves files
+    # unopened and says so in its own caveat, and claiming coverage here would
+    # contradict that warning on the very next round.
     return ("\nNEW SINCE YOUR LAST REVIEW at `" + old[:7] + "` — the diff above is "
-            "the WHOLE\npull request; these are the only parts of it that have moved "
-            "since you\nlast looked: " + shown + ".\nEverything else you have already "
-            "reviewed once. Read the new material first,\nthen re-check what it could "
-            "have broken — a later commit can break code\nthat was correct when you "
-            "read it.\n")
+            "the WHOLE\npull request; " + lead + shown + ".\nEverything else was "
+            "already present at that review. Read the new material\nfirst, then "
+            "re-check what it could have broken — a later commit can break\ncode "
+            "that was correct when you read it.\n")
 
 
 REVIEWER_SYSTEM = """You are a senior engineer reviewing a colleague's pull
@@ -597,8 +665,7 @@ def commit_messages(repo, pr):
     """
     try:
         return [((c.get("commit") or {}).get("message") or "")
-                for c in json.loads(
-                    gh(f"/repos/{ORG}/{repo}/pulls/{pr}/commits?per_page=100"))]
+                for c in _paged(f"/repos/{ORG}/{repo}/pulls/{pr}/commits")]
     except Exception as e:  # noqa: BLE001 — context, never a reason to stop
         print(f"[pr-review] could not read commits: {type(e).__name__}: {e}")
         return []
@@ -1790,6 +1857,18 @@ def _diff_paths(diff):
                                            re.M)} - {"dev/null"}
 
 
+def _diff_paths_with_deletions(diff):
+    """`_diff_paths` plus the files the diff DELETES.
+
+    A deletion's `+++` line is `/dev/null`, so `_diff_paths` deliberately
+    returns nothing for it — which is right for "what can be read at head" and
+    wrong for "what does this PR touch". Anything intersecting a list of paths
+    against the PR would silently drop every removal.
+    """
+    gone = {m.group(1) for m in re.finditer(r"^--- a/(.+)$", diff or "", re.M)}
+    return (_diff_paths(diff) | gone) - {"dev/null"}
+
+
 def review_findings(prompt, work, repo=""):
     """The findings for a change, with an EMPTY result confirmed by a second run.
 
@@ -2131,9 +2210,18 @@ def _verdict_withheld(body, event):
     nobody had checked.
     """
     verdict = event.lower().replace("_", " ")
-    note = (f"> **⚠️ GitHub would not record a `{verdict}` from this account.** "
-            f"The findings below stand; the verdict does not. Nothing here has "
-            f"been recorded as an approval.\n\n")
+    # "a `approve`" — the article has to follow the verdict, and the closing
+    # sentence has to as well: "nothing has been recorded as an approval" is
+    # the load-bearing line under a refused APPROVE and a non-sequitur under a
+    # refused REQUEST_CHANGES, where what the reader needs to know is that
+    # nothing is blocking them.
+    article = "an" if verdict[:1] in "aeiou" else "a"
+    tail = ("Nothing here has been recorded as an approval."
+            if event.upper() == "APPROVE" else
+            "Nothing here blocks the merge.")
+    note = (f"> **⚠️ GitHub would not record {article} `{verdict}` from this "
+            f"account.** The findings below stand; the verdict does not. "
+            f"{tail}\n\n")
     cleaned = body.replace("### AI review — no findings\n",
                            "### AI review — no findings, verdict not recorded\n")
     cleaned = cleaned.replace(
@@ -2694,7 +2782,8 @@ def _metadata_findings_now(title, commits, body):
             checks.ticket_in_title(title) + checks.agent_session_url(commits, body)}
 
 
-def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body=""):
+def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body="",
+                     revs=None):
     """Has this exact state already been reviewed? Returns a reason, or None.
 
     TWO WAYS NOTHING IS NEW, and both were costing a full agent run:
@@ -2712,12 +2801,7 @@ def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body=""):
     correctly declines to skip — the re-request arrow still works, which is the
     property `_release_review_request` exists to protect.
     """
-    try:
-        revs = json.loads(gh(f"/repos/{ORG}/{repo}/pulls/{pr}/reviews"))
-    except Exception as e:  # noqa: BLE001 — unanswerable means "review it"
-        print(f"[pr-review] could not read prior reviews ({type(e).__name__}) "
-              "— reviewing rather than assuming nothing changed")
-        return None
+    revs = _reviews(repo, pr) if revs is None else revs
     me = _me()
     mine = [r for r in revs if (r.get("user") or {}).get("login") == me] if me else []
     if not mine:
@@ -2813,10 +2897,13 @@ def main():
 
     # NOTHING NEW, NOTHING TO SAY — checked here, before the checkout and the
     # multi-minute agent run, because the whole point is not to spend them.
+    # ONE fetch, two readers: the nothing-new guard and the since-list ask the
+    # same endpoint the same question minutes apart.
+    revs = _reviews(repo, pr)
     nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], diff,
                                     title=meta.get("title") or "",
                                     commits=commit_messages(repo, pr),
-                                    body=meta.get("body") or "")
+                                    body=meta.get("body") or "", revs=revs)
     if nothing_new:
         print(f"nothing new to review: {nothing_new}")
         return
@@ -2855,7 +2942,8 @@ def main():
                                prior=conversation(repo, pr)
                                + changed_since_last_review(
                                    repo, pr, meta["head"]["sha"],
-                                   list(changed) + pr_paths))
+                                   list(_diff_paths_with_deletions(diff))
+                                   + pr_paths, revs=revs))
         findings = review_findings(prompt, work, repo)
         # ONE pass that drops, corrects and adds — against the conversation that
         # already read the code, so it costs a single call and no traversal.

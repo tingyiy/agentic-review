@@ -266,14 +266,20 @@ class TestItReadsEverywhereARebuttalLands:
         old = [{"user": {"login": "octocat"}, "created_at": "2026-08-30T01:00:00Z"}] * 100
         new = [{"user": {"login": "octocat"}, "created_at": "2026-08-31T11:00:00Z"}]
 
+        # `&page=1`, NOT `page=1`: the query is `?per_page=100&page=2`, and
+        # "page=1" is a substring of "per_page=100" — so a stub keyed on the
+        # bare fragment hands page one back for EVERY page. This test then
+        # walked to the twenty-page fuse and never saw the reply it exists to
+        # find; it passed only because the review list above it was empty and
+        # the caller returned before ever asking.
         def gh(path, **k):
             if "/reviews" in path:
-                if "page=1" in path:
+                if "&page=1" in path:
                     return json.dumps([{"user": {"login": BOT}, "commit_id": SHA,
                                         "body": "", "submitted_at": "2026-08-31T10:00:00Z"}])
                 return json.dumps([])
             if "/issues/1/comments" in path:
-                return json.dumps(old if "page=1" in path else new)
+                return json.dumps(old if "&page=1" in path else new)
             return json.dumps([])
         monkeypatch.setattr(m, "gh", gh)
         assert m._already_reviewed("r", 1, SHA, DIFF) is None, (
@@ -288,7 +294,7 @@ class TestItReadsEverywhereARebuttalLands:
 
         def gh(path, **k):
             calls.append(path)
-            if "/reviews" in path and "page=1" in path:
+            if "/reviews" in path and "&page=1" in path:
                 return json.dumps([{"user": {"login": BOT}, "commit_id": SHA,
                                     "body": "", "submitted_at": "2026-08-31T10:00:00Z"}])
             return json.dumps([])
