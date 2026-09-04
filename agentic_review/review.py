@@ -82,6 +82,32 @@ _LOW_PRIORITY = re.compile(
     r"(^|/)CLAUDE\.md$", re.I)
 
 
+class _Skipped(list):
+    """The skipped paths, which still counts and formats as the number of them.
+
+    `pr_diff`'s third value was an int, and three call sites — including the
+    posted review's "N generated/binary files skipped" — read it as one. The
+    paths are what a filter needs; the count is what the prose needs. This is
+    both, so no caller had to change and none can silently get the wrong one.
+    """
+
+    def __index__(self):
+        return len(self)
+
+    def __format__(self, spec):
+        return format(len(self), spec)
+
+    def __eq__(self, other):
+        if isinstance(other, int):
+            return len(self) == other
+        return list.__eq__(self, other)
+
+    # NOT hashable, deliberately: it is a mutable list, and giving it a hash
+    # while `__eq__` also matches an int would put `_Skipped([...])` and `2`
+    # in a set as one key or two depending on the order they arrived.
+    __hash__ = None
+
+
 def pr_diff(repo, pr):
     """The reviewable part of the diff, and — by name — what was left out.
 
@@ -106,17 +132,21 @@ def pr_diff(repo, pr):
     defects are. Order within each group is git's.
     """
     raw = gh(f"/repos/{ORG}/{repo}/pulls/{pr}", accept="application/vnd.github.v3.diff")
-    files, skipped = [], 0
+    files, skipped_paths = [], []
     for i, chunk in enumerate(raw.split("\ndiff --git ")):
         blob = chunk if i == 0 else "diff --git " + chunk
         if not blob.strip():
             continue
         header = blob.split("\n", 1)[0]
-        if SKIP.search(header):
-            skipped += 1
-            continue
         m = re.search(r"^\+\+\+ b/(.+)$", blob, re.M)
         path = m.group(1).strip() if m else header
+        if SKIP.search(header):
+            # THE PATH, not just a tally. A caller that knows only "3 files
+            # were skipped" cannot tell that a changed `uv.lock` IS part of
+            # this PR, and anything reasoning about which files the change
+            # touches then treats it as untouched.
+            skipped_paths.append(path)
+            continue
         files.append((path, blob))
     files.sort(key=lambda f: bool(_LOW_PRIORITY.search(f[0])))
     kept, excluded, used = [], [], 0
@@ -127,7 +157,7 @@ def pr_diff(repo, pr):
             continue
         kept.append(blob)
         used += len(blob) + 1
-    return "\n".join(kept), excluded, skipped
+    return "\n".join(kept), excluded, _Skipped(skipped_paths)
 
 
 #: git stderr that means THE NETWORK, not the repository. Used only to word the
@@ -482,7 +512,7 @@ def commit_messages(repo, pr):
         return []
 
 
-def build_context(repo, pr, meta, work, changed):
+def build_context(repo, pr, meta, work, changed, diff, excluded=()):
     """Everything the reviewer is TOLD, as opposed to what it can go and find.
 
     The order is deliberate and it is the order a human would read in: the
@@ -527,7 +557,21 @@ def build_context(repo, pr, meta, work, changed):
     if ci_section:
         print("  ci: " + ("pending" if "still running" in ci_section else "results")
               + " on the head commit", flush=True)
-    return ctx.build(work, changed, ticket_section, linked_section) + ci_section
+    # BEFORE the greps, not after: up to MAX_XREF_NAMES subprocesses run here,
+    # each with its own timeout, and a silent four minutes reads as a hang.
+    names = ctx.xref_names(diff)
+    if names:
+        print(f"  cross-refs: searching {min(len(names), ctx.MAX_XREF_NAMES)} "
+              f"name(s) used by this change", flush=True)
+    xref_section = ctx.cross_references(work, diff, changed,
+                                        also_changed=excluded)
+    if xref_section:
+        # The row marker, not every bullet: the "list cut" line is a bullet too,
+        # and counting it reported one name more than the section carries.
+        print(f"  cross-refs: {xref_section.count('` also in:')} name(s) also "
+              "used outside the diff", flush=True)
+    return (ctx.build(work, changed, ticket_section, linked_section, xref_section)
+            + ci_section)
 
 
 def run_agent(prompt, cwd, timeout=None):
@@ -2521,6 +2565,13 @@ def main():
     # the pending status itself waits until the nothing-new guard has passed.
     _CURRENT["head"] = meta["head"]["sha"]
     diff, excluded, skipped = pr_diff(repo, pr)
+    # Files the PR touches: what the diff shows, what the budget cut, and what
+    # was skipped as generated. Anything reasoning about "does the change touch
+    # this file" needs all three or it will call a changed file untouched.
+    # `skipped` is a count to everything that formats it and a path list to
+    # this; a stub or an older caller may hand over a bare int, so ask.
+    pr_paths = list(excluded or []) + (list(skipped)
+                                       if isinstance(skipped, list) else [])
     truncated = bool(excluded)
     if not diff.strip():
         print(f"nothing reviewable ({skipped} generated files skipped)")
@@ -2570,7 +2621,8 @@ def main():
         # PR look freshly changed the first time this shipped.
         shown = ctx.expand_hunks(diff, work, max_chars=int(MAX_DIFF * 1.6))
         prompt = PROMPT.format(repo=repo, path=work, diff=shown, caveats=caveats,
-                               context=build_context(repo, pr, meta, work, changed),
+                               context=build_context(repo, pr, meta, work, changed,
+                                                     diff, pr_paths),
                                prior=conversation(repo, pr))
         findings = review_findings(prompt, work, repo)
         # ONE pass that drops, corrects and adds — against the conversation that

@@ -244,11 +244,254 @@ def linked_prs(refs, fetch, skip=(), limit=MAX_LINKED_PRS):
             + "\n\n".join(blocks) + "\n")
 
 
-def build(work, changed_paths, tracker_section="", linked_section=""):
+def build(work, changed_paths, tracker_section="", linked_section="",
+          xref_section=""):
     """Assemble the whole context block, in the order a human would read it."""
     parts = [convention_docs(work, changed_paths), tracker_section,
-             linked_section, repo_map(work)]
+             linked_section, xref_section, repo_map(work)]
     return "".join(p for p in parts if p)
+
+
+# --------------------------------------------------------------------------
+# Cross-references: where else the repository mentions the names this diff uses
+# --------------------------------------------------------------------------
+# Measured against a second reviewer on six pull requests (2026-09-03). Of the
+# defects only it found, three were the same shape: a name in the diff that has
+# ANOTHER definition or ANOTHER consumer somewhere the diff does not touch.
+#
+#   · a CSS class the diff sets was also declared in the stylesheet, and the
+#     two rules fought;
+#   · a payload key the diff produced was ignored by the handler that reads it;
+#   · a storage key the diff wrote was already written by a second component,
+#     so upgraded installs ended up with two values.
+#
+# Each needed one grep. The agent HAS grep and did not think to run it, so this
+# runs it in advance: for every identifier the added lines introduce or handle,
+# the files outside the diff that also mention it. Not the contents — the
+# POINTER, which is what turns "I did not think to look" into "there is a
+# second mention, go and read it".
+#
+# Deliberately NOT a call graph or a class diagram. Both were measured on this
+# codebase and rejected: PyCG found no edge for the case that mattered (tests
+# reach routes by URL string), and a class diagram answers questions the agent
+# already answers with one grep. The misses were never about class structure.
+
+#: How many names are worth chasing, and how many mentions each. Both small:
+#: this is a pointer list, and a long one is skimmed rather than read.
+#:
+#: The name cap bounds the SEARCHES, not the rows: a name with no outside hit
+#: produces no row, so capping rows alone let a large diff run one grep per
+#: extracted name while still advertising a bound it did not keep.
+#:
+#: 12 was a guess, and it was too small for the case this exists to catch: on
+#: the PR that motivated the feature, 18 names carried a separator and
+#: `prog--cpsa` — the class behind the defect — sat past the cut. MEASURED
+#: instead: 30 greps take 0.89s on browser-extension and 0.69s on slack-app,
+#: so the subprocesses are not the constraint. `MAX_XREF_CHARS` bounds what
+#: reaches the prompt on its own, which is the constraint that matters.
+MAX_XREF_NAMES = 30
+MAX_XREF_FILES = 4
+#: The ROWS' budget, not the section's: the explanatory header is fixed
+#: overhead and is not worth making the pointer list shorter to pay for.
+MAX_XREF_CHARS = 2_400
+
+#: Paths whose contents are not worth pointing a reviewer at, and which
+#: `pr_diff` has already dropped from the diff without recording the path.
+_GENERATED = re.compile(
+    r"(^|/)(node_modules|dist|build|coverage|vendor|\.next|__snapshots__)/"
+    r"|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|"
+    r"Cargo\.lock|go\.sum)$"
+    r"|\.(min\.js|min\.css|map|png|jpe?g|gif|svg|ico|woff2?|ttf|pdf|zip)$",
+    re.I)
+
+#: Names that match half the repository. A cross-reference for `id` or `data`
+#: is noise, and noise here is expensive: it pushes the real pointer off the
+#: bottom of a capped list.
+_XREF_STOP = {
+    "id", "ids", "data", "type", "name", "key", "keys", "value", "values",
+    "self", "this", "true", "false", "null", "none", "error", "result",
+    "response", "request", "config", "options", "props", "state", "item",
+    "items", "list", "index", "test", "tests", "main", "init", "get", "set",
+    "url", "path", "file", "line", "text", "class", "style", "styles",
+}
+
+#: A line that looks like a CSS selector rather than code. Two shapes, and the
+#: split keeps `this.someField,` out while letting `button.wallet-card:hover {`
+#: in — element-qualified selectors are common and were invisible:
+#:
+#:   · begins with a class and ends in `{` or `,` — `.a, .b {`, `.card .title,`
+#:   · anything ending in `{` that contains a class — `button.x:hover {`
+#:
+#: `(`, `)`, `;` and `=` are excluded throughout, which is what keeps
+#: `foo.barBaz(x);` and `const x = a.bcd,` from being read as selectors.
+_SELECTOR_LINE = re.compile(
+    r"^\s*(?:"
+    r"\.[a-zA-Z][\w-]*[^{;()=]*[{,]"
+    r"|[^{;()=]*\.[a-zA-Z][\w-]{2,}[^{;()=]*\{"
+    r")\s*$")
+
+#: Each class token inside such a line.
+_SELECTOR_CLASS = re.compile(r"\.([a-zA-Z][\w-]{2,})")
+
+#: What counts as a name worth chasing, in the diff's ADDED lines.
+_XREF_PATTERNS = (
+    # A CSS class the change declares or applies: `.prog--cpsa {`, `class="x"`,
+    # `classList.add('x')`, `className={'x'}`.
+    # EVERY class in a selector line, not just the leading one: `.a, .b {`
+    # and `.panel > .row {` each declare two, and the rule that conflicts is
+    # as likely to be the second. Anchored on a selector-looking line so a
+    # `foo.bar()` method call in ordinary code is not read as a class.
+    _SELECTOR_LINE,
+    re.compile(r"""class(?:Name)?\s*=\s*\{?\s*["']([^"'}]{3,80})["']"""),
+    # A class assembled by concatenation: `"prog" + (on ? " prog--cpsa" : "")`.
+    # Two traps, both real, both from the very PR this feature was built for:
+    # the literal carries a LEADING SPACE for joining, and BEM's `--` is two
+    # separators in a row. Either one alone made the class invisible.
+    re.compile(r"""["']\s*([a-z][a-z0-9]*(?:[_-]+[a-z0-9]+)+)\s*["']"""),
+    re.compile(r"""classList\.(?:add|remove|toggle)\(\s*["']([\w-]{3,})["']"""),
+    # A key or status value the change reads or writes, as a quoted literal
+    # used with a subscript or a comparison.
+    re.compile(r"""\[\s*["']([a-z][\w.-]{2,})["']\s*\]"""),
+    re.compile(r"""(?:==|===|!=|!==|\bis\b|\bin\b)\s*["']([a-z][\w.-]{2,})["']"""),
+    re.compile(r"""["']([a-z][a-z0-9]*(?:[_-]+[a-z0-9]+)+)["']"""),
+    # A definition the change introduces.
+    re.compile(r"^\s*(?:async\s+)?def\s+(\w{3,})"),
+    re.compile(r"^\s*class\s+(\w{3,})"),
+    re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w{3,})"),
+    re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+(\w{3,})\s*="),
+)
+
+
+def xref_names(diff):
+    """Identifiers worth chasing, from the diff's ADDED lines, in order.
+
+    Added lines only: a name the change merely walks past is not a name the
+    change is making a claim about, and every entry here costs a grep.
+    """
+    seen, out = set(), []
+    for line in (diff or "").splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        body = line[1:]
+        for pattern in _XREF_PATTERNS:
+            if pattern is _SELECTOR_LINE:
+                # A whole selector line: take every class it declares.
+                found = (_SELECTOR_CLASS.findall(body)
+                         if _SELECTOR_LINE.match(body) else [])
+            else:
+                found = pattern.findall(body)
+            for raw in found:
+                for name in str(raw).split():
+                    name = name.strip(".:,;")
+                    if (len(name) < 3 or name.lower() in _XREF_STOP
+                            or name in seen or not re.fullmatch(r"[\w.-]+", name)):
+                        continue
+                    seen.add(name)
+                    out.append(name)
+    return out
+
+
+#: `prog--cpsa`, `unspecified_keys`, `EMPLOYER_KEY_PREFIX`, `caeli_visitor_id`.
+#: A dash or an underscore is what a CSS class, a wire key, a storage key and a
+#: shared constant have in common, and all four MEAN something on the other
+#: side of a file boundary — which is the entire question this section asks.
+_HYPHEN_OR_UNDERSCORE = re.compile(r"[-_]")
+
+#: `renderEmployerPrograms`, `byEmployer`. Usually a function or a local, and
+#: usually confined to the file that declares it — worth chasing after the
+#: first group, not instead of it.
+_CAMEL = re.compile(r"[a-z][A-Z]")
+
+
+def rank_names(names):
+    """The order the cap should spend itself in.
+
+    Appearance order alone put `prog--cpsa` — the class behind a defect this
+    reviewer missed three runs running — at position 26 of 55, past a cap of
+    12, so it was never searched at all. Ranking by shape fixes that without
+    guessing at meaning: within each tier the original order is kept, so the
+    result stays deterministic.
+    """
+    tiers = ([], [], [])
+    for n in names:
+        tiers[0 if _HYPHEN_OR_UNDERSCORE.search(n)
+              else 1 if _CAMEL.search(n) else 2].append(n)
+    return tiers[0] + tiers[1] + tiers[2]
+
+
+def cross_references(work, diff, changed_paths, run=None, also_changed=()):
+    """Where else the repository mentions the names this change introduces.
+
+    Never raises: every grep is best-effort, and a review without this section
+    is the review we shipped for weeks.
+    """
+    names = rank_names(xref_names(diff))[:MAX_XREF_NAMES]
+    if not names:
+        return ""
+    # `changed_paths` comes from the diff SHOWN, which `pr_diff` may have cut
+    # at the budget. A file the PR touches but the diff dropped would otherwise
+    # be reported as untouched, and the model would treat an already-updated
+    # consumer as stale. `also_changed` carries those paths.
+    #
+    # Generated and binary files arrive through `also_changed` too: `pr_diff`
+    # returns the paths it skipped, so a changed lockfile is known to be part
+    # of the PR rather than advertised as untouched. `_GENERATED` below is a
+    # separate job and still earns its place — it drops pointers INTO vendored
+    # and built files the PR never touched, where a cross-reference was never
+    # a useful thing to hand a reviewer.
+    changed = set(changed_paths or ()) | set(also_changed or ())
+    runner = run or _git_grep_files
+    rows, used, dropped = [], 0, 0
+    for name in names:
+        try:
+            hits = runner(work, name)
+        except Exception:  # noqa: BLE001 — a pointer list is never worth a review
+            continue
+        # Only mentions the diff does NOT already show. A name that lives
+        # entirely inside the change is not a second consumer.
+        outside = [h for h in hits
+                   if h not in changed and not _GENERATED.search(h)]
+        if not outside:
+            continue
+        elsewhere = outside[:MAX_XREF_FILES]
+        row = f"- `{name}` also in: " + ", ".join(elsewhere)
+        # SAY WHAT WAS CUT. This module's own rule: every truncation says so in
+        # the text the model reads, or the list reads as exhaustive and the
+        # model stops looking. `grep` is the recovery, and it has grep.
+        if len(outside) > len(elsewhere):
+            row += (f" (+{len(outside) - len(elsewhere)} more — "
+                    f"`grep -rl {name}` for the rest)")
+        # Checked AFTER building the row: a repository path can be long, and a
+        # budget tested only beforehand is a budget the last row walks past.
+        if used + len(row) > MAX_XREF_CHARS:
+            dropped += 1
+            break
+        rows.append(row)
+        used += len(row)
+    cut = dropped or len(xref_names(diff)) > len(names)
+    if cut:
+        # ANNOUNCED EVEN WHEN NOTHING SURVIVED. An early "return ''" here hid
+        # the cut in the one case where it matters most: the searched names
+        # had no outside hit and the unsearched ones were never tried.
+        rows.append("- (list cut for length — `grep -rl <name>` for any other "
+                    "name this change touches)")
+    if not rows:
+        return ""
+    return ("\nWHERE ELSE THESE NAMES APPEAR. Each name below is introduced or\n"
+            "handled by this change AND occurs in files the change does not\n"
+            "touch. That second occurrence is the question: is it another\n"
+            "definition that now conflicts, another consumer that was not\n"
+            "updated, or simply an unrelated use? Open the ones that matter —\n"
+            "this list is a pointer, not an answer, and an unrelated match is\n"
+            "the common case.\n\n" + "\n".join(rows) + "\n")
+
+
+def _git_grep_files(work, name):
+    """Files mentioning `name`, as a fixed string. Repository-tracked only."""
+    p = subprocess.run(
+        ["git", "-C", work, "grep", "-l", "--fixed-strings", "--", name],
+        capture_output=True, text=True, timeout=20)
+    return [l.strip() for l in (p.stdout or "").splitlines() if l.strip()]
 
 
 # --------------------------------------------------------------------------
