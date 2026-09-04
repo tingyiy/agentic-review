@@ -247,3 +247,44 @@ class TestClassNamesAssembledByConcatenation:
         const-definition pattern, which is a different question.)"""
         assert "hello" not in ctx.xref_names('+  const msg = "hello";')
         assert ctx.xref_names('+  return "hello";') == []
+
+
+class TestEverySelectorClassAndNoGeneratedFiles:
+    """The third round of review findings on this PR."""
+
+    @pytest.mark.parametrize("line,expected", [
+        ("+.a-list, .b-list {", ["a-list", "b-list"]),
+        ("+.panel > .row-item {", ["panel", "row-item"]),
+        ("+.card .card-title,", ["card", "card-title"]),
+    ])
+    def test_every_class_in_the_selector_is_chased(self, line, expected):
+        """Only the leading class was taken, so a conflicting rule on the
+        SECOND class stayed undiscoverable — and CSS conflicts are the primary
+        use case."""
+        assert ctx.xref_names(line) == expected
+
+    @pytest.mark.parametrize("line", [
+        "+  foo.barBaz(x);",
+        "+  return obj.someField;",
+    ])
+    def test_a_method_call_is_not_a_selector(self, line):
+        assert ctx.xref_names(line) == []
+
+    @pytest.mark.parametrize("path", [
+        "package-lock.json", "yarn.lock", "node_modules/x/index.js",
+        "dist/bundle.min.js", "src/icons/logo.svg", "coverage/lcov.info",
+    ])
+    def test_generated_and_binary_hits_are_not_pointers(self, path):
+        """`pr_diff` drops these keeping only a count, so their paths reach
+        neither `changed` nor `excluded` — without this they would be
+        presented as files the change does not touch. A cross-reference into
+        a lockfile was never a useful pointer anyway."""
+        assert ctx.cross_references(
+            "/w", "+const the_key = 1;\n", set(),
+            run=lambda w, n: [path]) == ""
+
+    def test_a_real_file_beside_a_generated_one_still_counts(self):
+        out = ctx.cross_references(
+            "/w", "+const the_key = 1;\n", set(),
+            run=lambda w, n: ["package-lock.json", "src/real.ts"])
+        assert "src/real.ts" in out and "package-lock" not in out

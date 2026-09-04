@@ -286,6 +286,15 @@ MAX_XREF_NAMES = 12
 MAX_XREF_FILES = 4
 MAX_XREF_CHARS = 2_400
 
+#: Paths whose contents are not worth pointing a reviewer at, and which
+#: `pr_diff` has already dropped from the diff without recording the path.
+_GENERATED = re.compile(
+    r"(^|/)(node_modules|dist|build|coverage|vendor|\.next|__snapshots__)/"
+    r"|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|"
+    r"Cargo\.lock|go\.sum)$"
+    r"|\.(min\.js|min\.css|map|png|jpe?g|gif|svg|ico|woff2?|ttf|pdf|zip)$",
+    re.I)
+
 #: Names that match half the repository. A cross-reference for `id` or `data`
 #: is noise, and noise here is expensive: it pushes the real pointer off the
 #: bottom of a capped list.
@@ -297,14 +306,22 @@ _XREF_STOP = {
     "url", "path", "file", "line", "text", "class", "style", "styles",
 }
 
+#: A line that looks like a CSS selector rather than code: it starts with a
+#: class and ends in a `{` or a `,`.
+_SELECTOR_LINE = re.compile(r"^\s*\.[a-zA-Z][\w-]*[^{;()]*[{,]\s*$")
+
+#: Each class token inside such a line.
+_SELECTOR_CLASS = re.compile(r"\.([a-zA-Z][\w-]{2,})")
+
 #: What counts as a name worth chasing, in the diff's ADDED lines.
 _XREF_PATTERNS = (
     # A CSS class the change declares or applies: `.prog--cpsa {`, `class="x"`,
     # `classList.add('x')`, `className={'x'}`.
-    # `.x {`, `.x, .y {`, `.x:hover {`, `.x.active {`, `.x > .y {`, `.x::after`.
-    # Anything but a word character ends the name; CSS declarations are the
-    # primary use case and a `{`-or-`,`-only pattern missed most of them.
-    re.compile(r"^\s*\.([a-zA-Z][\w-]{2,})(?=[\s,{:.>+~\[])"),
+    # EVERY class in a selector line, not just the leading one: `.a, .b {`
+    # and `.panel > .row {` each declare two, and the rule that conflicts is
+    # as likely to be the second. Anchored on a selector-looking line so a
+    # `foo.bar()` method call in ordinary code is not read as a class.
+    _SELECTOR_LINE,
     re.compile(r"""class(?:Name)?\s*=\s*\{?\s*["']([^"'}]{3,80})["']"""),
     # A class assembled by concatenation: `"prog" + (on ? " prog--cpsa" : "")`.
     # Two traps, both real, both from the very PR this feature was built for:
@@ -337,7 +354,13 @@ def xref_names(diff):
             continue
         body = line[1:]
         for pattern in _XREF_PATTERNS:
-            for raw in pattern.findall(body):
+            if pattern is _SELECTOR_LINE:
+                # A whole selector line: take every class it declares.
+                found = (_SELECTOR_CLASS.findall(body)
+                         if _SELECTOR_LINE.match(body) else [])
+            else:
+                found = pattern.findall(body)
+            for raw in found:
                 for name in str(raw).split():
                     name = name.strip(".:,;")
                     if (len(name) < 3 or name.lower() in _XREF_STOP
@@ -361,6 +384,12 @@ def cross_references(work, diff, changed_paths, run=None, also_changed=()):
     # at the budget. A file the PR touches but the diff dropped would otherwise
     # be reported as untouched, and the model would treat an already-updated
     # consumer as stale. `also_changed` carries those paths.
+    #
+    # Generated and binary files are a third case: `pr_diff` drops them keeping
+    # only a COUNT, so their paths reach neither list. A changed lockfile that
+    # happens to contain a name would be presented as untouched. Nothing here
+    # can name them, so hits that LOOK generated are dropped instead — a
+    # cross-reference into a lockfile was never a useful pointer anyway.
     changed = set(changed_paths or ()) | set(also_changed or ())
     runner = run or _git_grep_files
     rows, used, dropped = [], 0, 0
@@ -371,7 +400,8 @@ def cross_references(work, diff, changed_paths, run=None, also_changed=()):
             continue
         # Only mentions the diff does NOT already show. A name that lives
         # entirely inside the change is not a second consumer.
-        outside = [h for h in hits if h not in changed]
+        outside = [h for h in hits
+                   if h not in changed and not _GENERATED.search(h)]
         if not outside:
             continue
         elsewhere = outside[:MAX_XREF_FILES]
