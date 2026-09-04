@@ -480,6 +480,98 @@ def conversation(repo, pr):
             + "\n\n".join(out) + "\n")
 
 
+#: The sha a past review says it READ, recovered from its own body.
+#:
+#: NOT `commit_id`: GitHub stamps that with the head at POST time, so a push
+#: that lands mid-run re-attributes a review to code it never saw (measured on
+#: slack-app#348). The body is the honest record — every review renders one of
+#: these two forms — and `commit_id` is only the fallback for a review posted
+#: before they existed.
+_READ_AT = re.compile(r"(?:It read|read the change at) `([0-9a-f]{7,40})`")
+
+#: Paths listed before the tail is summarised. Long enough for a normal round
+#: of fixes, short enough that a rebase onto a moved base cannot flood the
+#: prompt with the whole PR.
+MAX_SINCE_PATHS = 40
+
+
+def _last_review_read(mine):
+    """The sha the most recent of our own reviews looked at, or ""."""
+    if not mine:
+        return ""
+    last = max(mine, key=lambda r: r.get("submitted_at") or "")
+    m = _READ_AT.search(last.get("body") or "")
+    return m.group(1) if m else (last.get("commit_id") or "")
+
+
+def changed_since_last_review(repo, pr, head_sha, pr_paths):
+    """Which of this PR's files have moved since we last looked. Never raises.
+
+    THE DIFF IS ALWAYS THE WHOLE PULL REQUEST. Round two is handed A, B, C and
+    D with nothing saying that C and D arrived after round one — the model has
+    to infer it from the order of the conversation block, and a truncated older
+    review body takes even that away. So say it outright.
+
+    It does not license skipping A and B: a later commit can break code that
+    was fine when it was read, and the round still reviews everything. What it
+    changes is where the attention goes first, and it stops the reviewer
+    presenting an already-answered file as though it were new material.
+
+    INTERSECTED WITH THE PR'S OWN PATHS. `compare` between two heads of the
+    same branch also carries whatever arrived from the base when the author
+    merged main — those files really did change in the tree, and they are
+    nobody's new work. The PR diff is `merge-base(base, head)..head`, so they
+    are absent from it, and intersecting removes exactly that noise.
+    """
+    try:
+        revs = json.loads(gh(f"/repos/{ORG}/{repo}/pulls/{pr}/reviews?per_page=100"))
+    except Exception as e:  # noqa: BLE001 — context, never a reason to stop
+        print(f"[pr-review] could not read prior reviews for the since-list: "
+              f"{type(e).__name__}")
+        return ""
+    me = _me()
+    # `isinstance` BEFORE `.get`: this is context, and context may not kill a
+    # review. A payload that is not a list of objects — an error body, a stub,
+    # a future API shape — used to raise an AttributeError out of here, past
+    # the narrow `except` around the fetch, and take the whole run with it.
+    mine = [r for r in revs
+            if isinstance(r, dict)
+            and (r.get("user") or {}).get("login") == me] if me else []
+    old = _last_review_read(mine)
+    # A first review has no "since", and an abbreviated sha that prefixes the
+    # head means the last review read this very commit.
+    if not old or (head_sha or "").startswith(old):
+        return ""
+    try:
+        cmp_ = json.loads(gh(f"/repos/{ORG}/{repo}/compare/{old}...{head_sha}"))
+    except Exception as e:  # noqa: BLE001 — a force-push makes `old` unreachable
+        print(f"[pr-review] could not compare {old[:7]}..{(head_sha or '')[:7]} "
+              f"({type(e).__name__}) — reviewing without a since-list")
+        return ""
+    want = {os.path.normpath(p) for p in (pr_paths or []) if p}
+    rows = []
+    for f in (cmp_.get("files") if isinstance(cmp_, dict) else None) or []:
+        if not isinstance(f, dict):
+            continue
+        name = f.get("filename") or ""
+        if name and os.path.normpath(name) in want:
+            rows.append((name, f.get("status") or "changed"))
+    if not rows:
+        return ""
+    rows.sort()
+    shown = ", ".join(f"`{n}` ({s})" for n, s in rows[:MAX_SINCE_PATHS])
+    if len(rows) > MAX_SINCE_PATHS:
+        shown += f", and {len(rows) - MAX_SINCE_PATHS} more"
+    print(f"  since `{old[:7]}`: {len(rows)} of this PR's file(s) changed",
+          flush=True)
+    return ("\nNEW SINCE YOUR LAST REVIEW at `" + old[:7] + "` — the diff above is "
+            "the WHOLE\npull request; these are the only parts of it that have moved "
+            "since you\nlast looked: " + shown + ".\nEverything else you have already "
+            "reviewed once. Read the new material first,\nthen re-check what it could "
+            "have broken — a later commit can break code\nthat was correct when you "
+            "read it.\n")
+
+
 REVIEWER_SYSTEM = """You are a senior engineer reviewing a colleague's pull
 request. You are sitting IN a checkout of the repository and you have three
 tools: read_file, grep and list_files. Use them.
@@ -2760,7 +2852,10 @@ def main():
         prompt = PROMPT.format(repo=repo, path=work, diff=shown, caveats=caveats,
                                context=build_context(repo, pr, meta, work, changed,
                                                      diff, pr_paths),
-                               prior=conversation(repo, pr))
+                               prior=conversation(repo, pr)
+                               + changed_since_last_review(
+                                   repo, pr, meta["head"]["sha"],
+                                   list(changed) + pr_paths))
         findings = review_findings(prompt, work, repo)
         # ONE pass that drops, corrects and adds — against the conversation that
         # already read the code, so it costs a single call and no traversal.
