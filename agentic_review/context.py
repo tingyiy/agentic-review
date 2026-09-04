@@ -280,8 +280,8 @@ def build(work, changed_paths, tracker_section="", linked_section="",
 #: this is a pointer list, and a long one is skimmed rather than read.
 #:
 #: The name cap bounds the SEARCHES, not the rows: a name with no outside hit
-#: produces no row, so capping rows alone let a large diff spend one 20-second
-#: subprocess per extracted name while still advertising the bound.
+#: produces no row, so capping rows alone let a large diff run one grep per
+#: extracted name while still advertising a bound it did not keep.
 #:
 #: 12 was a guess, and it was too small for the case this exists to catch: on
 #: the PR that motivated the feature, 18 names carried a separator and
@@ -433,11 +433,12 @@ def cross_references(work, diff, changed_paths, run=None, also_changed=()):
     # be reported as untouched, and the model would treat an already-updated
     # consumer as stale. `also_changed` carries those paths.
     #
-    # Generated and binary files are a third case: `pr_diff` drops them keeping
-    # only a COUNT, so their paths reach neither list. A changed lockfile that
-    # happens to contain a name would be presented as untouched. Nothing here
-    # can name them, so hits that LOOK generated are dropped instead — a
-    # cross-reference into a lockfile was never a useful pointer anyway.
+    # Generated and binary files arrive through `also_changed` too: `pr_diff`
+    # returns the paths it skipped, so a changed lockfile is known to be part
+    # of the PR rather than advertised as untouched. `_GENERATED` below is a
+    # separate job and still earns its place — it drops pointers INTO vendored
+    # and built files the PR never touched, where a cross-reference was never
+    # a useful thing to hand a reviewer.
     changed = set(changed_paths or ()) | set(also_changed or ())
     runner = run or _git_grep_files
     rows, used, dropped = [], 0, 0
