@@ -403,3 +403,36 @@ class TestFoundByOurOwnReviewerOnThisPR:
         from agentic_review.review import _Skipped
         with pytest.raises(TypeError):
             {_Skipped(["a.lock"]): 1}
+
+
+class TestElementQualifiedSelectors:
+    """`button.wallet-card:hover {` was invisible because the line had to
+    begin with a dot. A common declaration form, and CSS conflicts are the
+    primary use case."""
+
+    @pytest.mark.parametrize("line,expected", [
+        ("+button.wallet-card:hover {", ["wallet-card"]),
+        ("+div.card .card-title {", ["card", "card-title"]),
+    ])
+    def test_a_type_selector_before_the_class_is_allowed(self, line, expected):
+        assert ctx.xref_names(line) == expected
+
+    def test_element_qualified_AND_comma_continued_is_deliberately_missed(self):
+        """`a.link-primary,` is a real selector and is not matched, because
+        the shape is indistinguishable from `this.someField,` without knowing
+        the language. The trade is stated rather than hidden: a missed CSS
+        class costs one pointer, a JS property read costs a wrong one on every
+        object literal in the diff."""
+        assert ctx.xref_names("+a.link-primary,") == []
+
+    @pytest.mark.parametrize("line", [
+        "+  foo.barBaz(x);",
+        "+  const x = a.bcd,",
+        "+  this.someField,",
+        "+  return obj.value;",
+    ])
+    def test_javascript_is_still_not_a_selector(self, line):
+        """The comma-continued form only counts when the line BEGINS with a
+        class; anything else has to end in `{`. That is what keeps object
+        literals and property reads out."""
+        assert ctx.xref_names(line) == []

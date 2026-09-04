@@ -315,9 +315,20 @@ _XREF_STOP = {
     "url", "path", "file", "line", "text", "class", "style", "styles",
 }
 
-#: A line that looks like a CSS selector rather than code: it starts with a
-#: class and ends in a `{` or a `,`.
-_SELECTOR_LINE = re.compile(r"^\s*\.[a-zA-Z][\w-]*[^{;()]*[{,]\s*$")
+#: A line that looks like a CSS selector rather than code. Two shapes, and the
+#: split keeps `this.someField,` out while letting `button.wallet-card:hover {`
+#: in — element-qualified selectors are common and were invisible:
+#:
+#:   · begins with a class and ends in `{` or `,` — `.a, .b {`, `.card .title,`
+#:   · anything ending in `{` that contains a class — `button.x:hover {`
+#:
+#: `(`, `)`, `;` and `=` are excluded throughout, which is what keeps
+#: `foo.barBaz(x);` and `const x = a.bcd,` from being read as selectors.
+_SELECTOR_LINE = re.compile(
+    r"^\s*(?:"
+    r"\.[a-zA-Z][\w-]*[^{;()=]*[{,]"
+    r"|[^{;()=]*\.[a-zA-Z][\w-]{2,}[^{;()=]*\{"
+    r")\s*$")
 
 #: Each class token inside such a line.
 _SELECTOR_CLASS = re.compile(r"\.([a-zA-Z][\w-]{2,})")
