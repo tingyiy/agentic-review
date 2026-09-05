@@ -227,3 +227,275 @@ class TestItPromisesOnlyWhatTheClockCanKeep:
     def test_it_still_says_they_are_not_missing(self, monkeypatch):
         seen = _Harness().run(monkeypatch, _blob("a.py"), [_blob("b.py")])
         assert "do not report them as missing" in seen["prompts"][0]
+
+
+class TestAFileTooBigForAnyPass:
+    """infra#180 added a 2 MB JSONL corpus. "The first file always fits" made
+    it `pass 2 of 2: 2,084,684 chars`; the transcript hit its budget on turn
+    one, the model answered in 32 characters having made no tool calls, and the
+    evidence guard correctly refused the whole review. Nobody was ever going to
+    read a truncated slab of that file."""
+
+    def _diff(self, monkeypatch, blobs, cap, ceiling):
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: "".join(blobs))
+        monkeypatch.setattr(pr, "MAX_DIFF", cap)
+        monkeypatch.setattr(pr, "MAX_FILE_DIFF", ceiling)
+        return pr.pr_diff("repo", 1)
+
+    def test_it_gets_a_skeleton_not_a_pass(self, monkeypatch):
+        small, huge = _blob("a.py"), _blob("data.jsonl", lines=4000)
+        diff, excluded, _ = self._diff(monkeypatch, [small, huge],
+                                       cap=10_000, ceiling=20_000)
+        assert "data.jsonl" in excluded
+        assert all("data.jsonl" not in p for p in [str(diff)] + list(diff.overflow))
+        assert "a.py" in diff
+
+    def test_the_fingerprint_still_sees_it(self, monkeypatch):
+        """`full` answers "what does this PR touch" and feeds the mark. Dropping
+        it there would make a push that changes only that file invisible to the
+        nothing-new guard — the bug the fingerprint was widened to fix."""
+        small, huge = _blob("a.py"), _blob("data.jsonl", lines=4000)
+        diff, _, _ = self._diff(monkeypatch, [small, huge],
+                                cap=10_000, ceiling=20_000)
+        assert "data.jsonl" in diff.full
+
+    def test_a_file_under_the_ceiling_still_gets_its_own_pass(self, monkeypatch):
+        """The point of multi-pass: a big SOURCE file is still reviewed."""
+        small, big = _blob("a.py"), _blob("src/big.py", lines=300)
+        diff, excluded, _ = self._diff(monkeypatch, [small, big],
+                                       cap=len(small) + 10, ceiling=1_000_000)
+        assert excluded == [] and "src/big.py" in "".join(diff.overflow)
+
+
+class TestNothingUnboundedReachesTheModel:
+    """`expand_hunks` returns the ORIGINAL diff when expanding would breach its
+    cap — `max_chars` bounds the expansion, not the prompt — and `pr_diff`
+    keeps the first file of a pass at any size. Before this there was no point
+    at which the text handed to the model was bounded."""
+
+    def test_it_truncates_at_a_line_and_says_so(self):
+        text = "\n".join(f"+line {i}" for i in range(2000))
+        out = pr._capped(text, 500)
+        assert len(out) < 900 and out.count("\n") > 5
+        assert "diff truncated here" in out and "open anything you need" in out
+        # "the tail of THIS FILE" was wrong: a pass holds several files, so
+        # what a cut loses can be whole ones.
+        assert "TAIL OF THIS DIFF" in out
+        assert not out.split("[diff truncated")[0].endswith("+line")
+
+    def test_it_leaves_a_diff_under_the_limit_alone(self):
+        text = "+one\n+two\n"
+        assert pr._capped(text, 10_000) == text
+
+    def test_the_prompt_itself_is_capped(self, monkeypatch):
+        """The wiring, not the helper: `expand_hunks` hands back an
+        un-expanded diff of any size, so the cap has to sit at the call site or
+        a single big file reaches the model whole — which is what emptied the
+        transcript on infra#180."""
+        monkeypatch.setattr(pr, "MAX_DIFF", 1_000)
+        seen = _Harness().run(monkeypatch, _blob("big.py", lines=600), [])
+        assert "diff truncated here" in seen["prompts"][0]
+        assert len(seen["prompts"][0]) < 20_000
+
+
+class TestAPRThatIsAllOversized:
+    """The 🟡 this reviewer raised on the PR that added the ceiling: when every
+    file is over it, the diff is empty and the run took the generated-files
+    exit — posting "nothing to review — no reviewable text in this change"
+    about a 2 MB file somebody deliberately committed. "Nothing to review" and
+    "I did not read it" are different sentences."""
+
+    def _run(self, monkeypatch, excluded):
+        seen = {}
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: (pr._Diff(""), list(excluded), pr._Skipped([])))
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "e" * 40}}))
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr, "post_review",
+                            lambda repo, prn, event, body, **k:
+                            seen.setdefault("posted", (event, body)) and "COMMENT")
+        monkeypatch.setattr(pr.status, "done",
+                            lambda repo, sha, event, summary:
+                            seen.setdefault("status", summary))
+        monkeypatch.setattr(pr.status, "nothing_to_review",
+                            lambda repo, sha, why: seen.setdefault("nothing", why))
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+        return seen
+
+    def test_it_does_not_claim_there_was_nothing_to_review(self, monkeypatch):
+        seen = self._run(monkeypatch, ["data.jsonl"])
+        assert "nothing" not in seen, "said 'nothing to review' about a real change"
+
+    def test_it_names_the_file_it_did_not_read(self, monkeypatch):
+        seen = self._run(monkeypatch, ["data.jsonl"])
+        event, body = seen["posted"]
+        assert event == "COMMENT" and "data.jsonl" in body
+        assert "NOT" in body and "1 file(s) too large to review" in seen["status"]
+
+    def test_a_generated_only_pr_still_takes_the_quiet_exit(self, monkeypatch):
+        """The other half must not regress: a PNG-only PR has genuinely nothing
+        to read, and a comment on every one of those would be noise."""
+        seen = self._run(monkeypatch, [])
+        assert "posted" not in seen and "nothing" in seen
+
+
+class TestTheCaveatNamesTheRightKnob:
+    """Round three on the PR that added the size ceiling: the all-oversized
+    path reused the over-budget note, whose advice is "raise
+    REVIEW_MAX_PASSES". An oversized file is over MAX_FILE_DIFF, not the pass
+    budget — more passes would not move it by a byte. The fix for unactionable
+    advice, reused one branch over, became unactionable again."""
+
+    def test_all_oversized_names_the_file_ceiling(self):
+        note = pr._unreviewed_files_note(["data.jsonl"], ["data.jsonl"])
+        assert "REVIEW_MAX_FILE_DIFF" in note
+        assert "REVIEW_MAX_PASSES" not in note
+
+    def test_over_budget_still_names_the_pass_budget(self):
+        note = pr._unreviewed_files_note(["src/a.py"], [])
+        assert "REVIEW_MAX_PASSES" in note and "REVIEW_MAX_FILE_DIFF" not in note
+
+    def test_a_mix_names_both_and_says_which_is_which(self):
+        note = pr._unreviewed_files_note(["src/a.py", "data.jsonl"], ["data.jsonl"])
+        assert "REVIEW_MAX_PASSES" in note and "REVIEW_MAX_FILE_DIFF" in note
+        assert "`data.jsonl`" in note
+
+    def test_pr_diff_reports_which_files_were_oversized(self, monkeypatch):
+        monkeypatch.setattr(pr, "gh", lambda *a, **k:
+                            _blob("a.py") + _blob("data.jsonl", lines=4000))
+        monkeypatch.setattr(pr, "MAX_DIFF", 10_000)
+        monkeypatch.setattr(pr, "MAX_FILE_DIFF", 20_000)
+        diff, excluded, _ = pr.pr_diff("repo", 1)
+        assert diff.oversized == ["data.jsonl"] and excluded == ["data.jsonl"]
+
+    def test_the_all_oversized_review_carries_that_advice(self, monkeypatch):
+        seen = {}
+        d = pr._Diff("")
+        d.oversized = ["data.jsonl"]
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: (d, ["data.jsonl"], pr._Skipped([])))
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "f" * 40}}))
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr, "post_review", lambda repo, prn, event, body, **k:
+                            seen.setdefault("body", body) and "COMMENT")
+        monkeypatch.setattr(pr.status, "done", lambda *a: None)
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+        assert "REVIEW_MAX_FILE_DIFF" in seen["body"]
+
+
+class TestTheReviewSaysWhichReviewerWroteIt:
+    """Tingyi's question, 2026-09-05. Moving to a `deployed` tag gave up the
+    record of WHICH reviewer version judged a PR — a pin left that in infra's
+    git history; a moving tag leaves only a job-log line that expires. Saying
+    it in the body puts the answer where the finding is, permanently."""
+
+    def test_the_findings_footer_carries_it(self, monkeypatch):
+        monkeypatch.setattr(pr, "reviewer_version", lambda: "abc1234")
+        body = pr.render([{"file": "a.py", "line": 1, "severity": "low",
+                           "title": "t", "detail": "d"}], False, 0,
+                         head_sha="b" * 40, repo="x")
+        assert "agentic-review at `abc1234`" in body
+
+    def test_the_approval_carries_it_too(self, monkeypatch):
+        """The verdict that unblocks a merge is the one worth attributing."""
+        monkeypatch.setattr(pr, "reviewer_version", lambda: "abc1234")
+        assert "It was agentic-review at `abc1234`." in pr.approval_body("a" * 40)
+
+    def test_an_unknown_version_says_nothing_rather_than_guessing(self, monkeypatch):
+        monkeypatch.setattr(pr, "reviewer_version", lambda: "")
+        body = pr.approval_body("a" * 40)
+        assert "agentic-review at" not in body and "{version}" not in body
+        assert "It was agentic-review" not in body
+
+    def test_an_approval_with_no_head_still_renders(self, monkeypatch):
+        """`{head}` is dropped by a string replace on that path — a second
+        placeholder there would have rendered as a literal brace."""
+        monkeypatch.setattr(pr, "reviewer_version", lambda: "abc1234")
+        body = pr.approval_body("")
+        assert "{" not in body and "agentic-review at `abc1234`" in body
+
+    def test_the_env_var_wins_over_git(self, monkeypatch):
+        monkeypatch.setenv("REVIEWER_SHA", "deadbee")
+        pr.reviewer_version.cache_clear()
+        assert pr.reviewer_version() == "deadbee"
+        pr.reviewer_version.cache_clear()
+
+    def test_a_git_failure_is_not_a_failed_review(self, monkeypatch):
+        monkeypatch.delenv("REVIEWER_SHA", raising=False)
+        monkeypatch.setattr(pr.subprocess, "run",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+        pr.reviewer_version.cache_clear()
+        assert pr.reviewer_version() == ""
+        pr.reviewer_version.cache_clear()
+
+
+class TestTheMixedCaseGetsTheRightKnobToo:
+    """Round four: `_which_knob` was wired only into the all-oversized early
+    return. `render` and `approval_body` still called the note with the default
+    empty `oversized`, and `_finalize_review` receives `diff=whole` — a plain
+    string — so the attribute was lost before it got there. A source change
+    plus a 2 MB data file, the common case, kept being told to raise
+    REVIEW_MAX_PASSES. The test that "proved" otherwise called the helper
+    directly with an explicit argument."""
+
+    FINDING = {"file": "a.py", "line": 1, "severity": "low", "title": "t",
+               "detail": "d"}
+
+    def test_render_names_the_file_ceiling_for_the_oversized_one(self):
+        body = pr.render([self.FINDING], True, 0, head_sha="b" * 40, repo="x",
+                         excluded=["src/a.py", "data.jsonl"],
+                         oversized=["data.jsonl"])
+        assert "REVIEW_MAX_FILE_DIFF" in body and "`data.jsonl`" in body
+
+    def test_the_approval_does_too(self):
+        body = pr.approval_body("b" * 40, repo="x",
+                                excluded=["src/a.py", "data.jsonl"],
+                                oversized=["data.jsonl"])
+        assert "REVIEW_MAX_FILE_DIFF" in body
+
+    def test_over_budget_only_is_unchanged(self):
+        body = pr.render([self.FINDING], True, 0, head_sha="b" * 40, repo="x",
+                         excluded=["src/a.py"])
+        assert "REVIEW_MAX_PASSES" in body and "REVIEW_MAX_FILE_DIFF" not in body
+
+    def test_main_carries_the_attribute_past_the_string(self, monkeypatch):
+        """The seam the finding walked through: `whole` is a str, so
+        `oversized` has to travel as its own argument."""
+        seen = {}
+        d = pr._Diff(_blob("a.py"))
+        d.full = _blob("a.py") + _blob("data.jsonl")
+        d.oversized = ["data.jsonl"]
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: (d, ["data.jsonl"], pr._Skipped([])))
+        monkeypatch.setattr(pr, "_finalize_review",
+                            lambda *a, **k: (seen.setdefault("oversized",
+                                                             k.get("oversized")),
+                                             "COMMENT"))
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "c" * 40}}))
+        monkeypatch.setattr(pr, "_already_reviewed", lambda *a, **k: "")
+        monkeypatch.setattr(pr, "conversation", lambda *a: "")
+        monkeypatch.setattr(pr, "changed_since_last_review", lambda *a, **k: "")
+        monkeypatch.setattr(pr, "build_context", lambda *a: "")
+        monkeypatch.setattr(pr, "commit_messages", lambda *a: [])
+        monkeypatch.setattr(pr, "checkout", lambda *a: None)
+        monkeypatch.setattr(pr.ctx, "expand_hunks", lambda d_, w, **k: d_)
+        monkeypatch.setattr(pr.ctx, "skeletons", lambda w, paths: "")
+        monkeypatch.setattr(pr, "review_findings", lambda *a, **k: [])
+        monkeypatch.setattr(pr, "_revise", lambda f, w, r: (f, []))
+        monkeypatch.setattr(pr.checks, "run_all", lambda *a, **k: [])
+        monkeypatch.setattr(pr, "post_review", lambda *a, **k: "COMMENT")
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+        assert seen.get("oversized") == ["data.jsonl"]
