@@ -2445,10 +2445,19 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
         # and SAY which verdict was withheld, so a clean review is not read as
         # an approval that never happened.
         post("COMMENT", _verdict_withheld(body, event))
-        # THE SAME RECONCILIATION A REAL COMMENT GETS. The fallback returned
-        # early and skipped it, so a clean review on a newer head left our own
-        # older CHANGES_REQUESTED standing — an approval would have superseded
-        # it, and this comment is what that approval turned into.
+        # THE SAME RECONCILIATION A REAL COMMENT GETS — and for a long time it
+        # was only half of it. This branch withdrew a stale approval and did NOT
+        # dismiss a stale block, while `_dismiss_stale_block` returns early on
+        # any event that is not "COMMENT" — so it was handed "APPROVE", the
+        # verdict GitHub had just refused, and did nothing. On a token that may
+        # not approve (every GitHub-hosted run) a clean review could therefore
+        # never clear this reviewer's own earlier CHANGES_REQUESTED, and the PR
+        # stayed blocked by a finding that was already fixed. Seen on this
+        # repository's own #10.
+        #
+        # "COMMENT" IS THE HONEST EVENT HERE: it is what GitHub recorded.
+        for rid in _dismiss_stale_block(repo, pr, "COMMENT", head_sha, truncated):
+            print(f"  dismissed our own stale CHANGES_REQUESTED ({rid})")
         for rid in _withdraw_stale_approval(repo, pr, head_sha):
             print(f"  withdrew our own now-stale APPROVE ({rid})")
         why = ("own PR" if SELF_REVIEW_REFUSAL in low
