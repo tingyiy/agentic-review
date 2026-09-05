@@ -772,8 +772,9 @@ def _capped(diff, limit):
         return diff
     cut = diff[:limit].rsplit("\n", 1)[0]
     return (cut + f"\n[diff truncated here: {len(diff):,} chars, showing "
-            f"{len(cut):,}. What is missing is the TAIL of this file — open it "
-            f"with read_file rather than assuming it is absent.]\n")
+            f"{len(cut):,}. What is missing is the TAIL OF THIS DIFF — whole "
+            f"files, or the rest of the last one — open anything you need with "
+            f"read_file rather than assuming it is absent.]\n")
 
 
 def _other_passes_note(n, parts):
@@ -1990,7 +1991,7 @@ def _apply_withdrawals(body, event, findings, withdrawn):
 
 def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
                      head_sha="", repo="", wire_fields=(), diff="",
-                     excluded=(), saw_every_change=None):
+                     excluded=(), saw_every_change=None, oversized=()):
     """The exact body and event this review will post.
 
     The WHOLE composition, not just the withdrawal branch, because the previous
@@ -2002,11 +2003,11 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     """
     unseen = False
     body = (approval_body(head_sha, repo=repo, wire_fields=wire_fields, diff=diff,
-                          excluded=excluded)
+                          excluded=excluded, oversized=oversized)
             if not findings
             else render(findings, truncated, skipped, head_sha=head_sha,
                         repo=repo, wire_fields=wire_fields, diff=diff,
-                        excluded=excluded))
+                        excluded=excluded, oversized=oversized))
     event = review_event(findings)
     # A PARTIAL REVIEW NEVER APPROVES. An approval is the one outcome that
     # carries authority, and one that covered 10 of 25 files reads exactly like
@@ -2848,9 +2849,9 @@ def _which_knob(excluded, oversized):
 
 
 def render(findings, truncated, skipped, head_sha="", repo="", diff="",
-           wire_fields=(), excluded=()):
+           wire_fields=(), excluded=(), oversized=()):
     findings.sort(key=lambda f: RANK[normalize_severity(f.get("severity"))])
-    lines = ["### AI review", "", _unreviewed_files_note(excluded)]
+    lines = ["### AI review", "", _unreviewed_files_note(excluded, oversized)]
     for f in findings[:MAX_FINDINGS]:
         sev = normalize_severity(f.get("severity"))
         where = _where_link(repo, f.get("file"), f.get("line"), head_sha)
@@ -2918,7 +2919,8 @@ APPROVAL = (
     "{version}")
 
 
-def approval_body(head_sha="", repo="", wire_fields=(), diff="", excluded=()):
+def approval_body(head_sha="", repo="", wire_fields=(), diff="", excluded=(),
+                  oversized=()):
     """APPROVAL with the commit it read, or without the claim if we cannot say.
 
     Same rule as the findings footer: absent beats wrong. A `{head}` left
@@ -2934,7 +2936,7 @@ def approval_body(head_sha="", repo="", wire_fields=(), diff="", excluded=()):
             else APPROVAL.format(head=head_sha[:7], version=version))
     if excluded:
         # The heading says "no findings"; the note says in what. Both true.
-        body = _unreviewed_files_note(excluded) + body
+        body = _unreviewed_files_note(excluded, oversized) + body
     # THE APPROVAL IS WHERE THIS MATTERS MOST. It is the verdict that unblocks a
     # merge, so a clean result on a change other repos consume is exactly the
     # one that should not read as full coverage.
@@ -3338,7 +3340,13 @@ def main():
                                    head_sha=head_sha, repo=repo,
                                    wire_fields=wire_fields, diff=whole,
                                    excluded=unopened,
-                                   saw_every_change=saw_every_change)
+                                   saw_every_change=saw_every_change,
+                                   # `whole` is a plain string by the time it
+                                   # gets here, so the attribute has to travel
+                                   # separately — losing it is what made the
+                                   # MIXED case keep the wrong advice while a
+                                   # helper-level test said otherwise.
+                                   oversized=getattr(diff, "oversized", ()))
 
     # LAST CHECK BEFORE POSTING. The agent poll aborts a review whose PR merges
     # mid-run, but the window between the agent finishing and the POST is not
