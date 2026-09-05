@@ -293,3 +293,48 @@ class TestNothingUnboundedReachesTheModel:
         seen = _Harness().run(monkeypatch, _blob("big.py", lines=600), [])
         assert "diff truncated here" in seen["prompts"][0]
         assert len(seen["prompts"][0]) < 20_000
+
+
+class TestAPRThatIsAllOversized:
+    """The 🟡 this reviewer raised on the PR that added the ceiling: when every
+    file is over it, the diff is empty and the run took the generated-files
+    exit — posting "nothing to review — no reviewable text in this change"
+    about a 2 MB file somebody deliberately committed. "Nothing to review" and
+    "I did not read it" are different sentences."""
+
+    def _run(self, monkeypatch, excluded):
+        seen = {}
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: (pr._Diff(""), list(excluded), pr._Skipped([])))
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "e" * 40}}))
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr, "post_review",
+                            lambda repo, prn, event, body, **k:
+                            seen.setdefault("posted", (event, body)) and "COMMENT")
+        monkeypatch.setattr(pr.status, "done",
+                            lambda repo, sha, event, summary:
+                            seen.setdefault("status", summary))
+        monkeypatch.setattr(pr.status, "nothing_to_review",
+                            lambda repo, sha, why: seen.setdefault("nothing", why))
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+        return seen
+
+    def test_it_does_not_claim_there_was_nothing_to_review(self, monkeypatch):
+        seen = self._run(monkeypatch, ["data.jsonl"])
+        assert "nothing" not in seen, "said 'nothing to review' about a real change"
+
+    def test_it_names_the_file_it_did_not_read(self, monkeypatch):
+        seen = self._run(monkeypatch, ["data.jsonl"])
+        event, body = seen["posted"]
+        assert event == "COMMENT" and "data.jsonl" in body
+        assert "NOT" in body and "1 file(s) too large to review" in seen["status"]
+
+    def test_a_generated_only_pr_still_takes_the_quiet_exit(self, monkeypatch):
+        """The other half must not regress: a PNG-only PR has genuinely nothing
+        to read, and a comment on every one of those would be noise."""
+        seen = self._run(monkeypatch, [])
+        assert "posted" not in seen and "nothing" in seen

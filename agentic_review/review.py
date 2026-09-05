@@ -3096,6 +3096,21 @@ def main():
     whole = getattr(diff, "full", "") or diff
     truncated = bool(excluded)
     if not diff.strip():
+        # "NOTHING TO REVIEW" AND "I DID NOT READ IT" ARE DIFFERENT SENTENCES,
+        # and the size ceiling made the second one wear the first's clothes: a
+        # PR whose every file is over `MAX_FILE_DIFF` leaves an empty diff, and
+        # saying "no reviewable text in this change" about a 2 MB file somebody
+        # deliberately committed is simply untrue. Found by this reviewer on the
+        # PR that added the ceiling.
+        if excluded:
+            note = _unreviewed_files_note(list(excluded))
+            print(f"nothing reviewed: {len(excluded)} file(s) over "
+                  f"{MAX_FILE_DIFF:,} chars")
+            event = post_review(repo, pr, "COMMENT", note,
+                                head_sha=meta["head"]["sha"], truncated=True)
+            status.done(repo, meta["head"]["sha"], event,
+                        f"{len(excluded)} file(s) too large to review")
+            return
         why = (f"{skipped} generated/binary file(s), nothing else changed"
                if skipped else "no reviewable text in this change")
         print(f"nothing reviewable ({why})")
