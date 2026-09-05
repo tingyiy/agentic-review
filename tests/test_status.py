@@ -211,3 +211,38 @@ class TestTheWiringInMain:
         monkeypatch.setattr(status, "ORG", "example-org")
         status.pending("app", "abc123")
         assert seen["timeout"] < 60
+
+
+class TestNothingReviewableIsStillAResult:
+    """caeli-marketing#243: two files, `public/og-image.png` and
+    `package-lock.json`, both on the generated/binary skip list. The run
+    printed "nothing reviewable" and exited in nine seconds — correctly — but
+    before the pending status, so the PR carried no `agentic-review` status at
+    all and read exactly like a reviewer that never ran."""
+
+    def test_it_says_so_on_the_commit(self, monkeypatch):
+        posts = _capture(monkeypatch)
+        status.nothing_to_review("app", "abc123", "2 generated/binary file(s)")
+        (method, path, body), = posts
+        assert method == "POST" and path.endswith("/statuses/abc123")
+        assert body["state"] == "success"
+        assert body["description"].startswith("nothing to review")
+        assert "2 generated/binary file(s)" in body["description"]
+
+    def test_a_skipped_review_no_longer_leaves_the_page_silent(self, monkeypatch):
+        """Driven through `main`, because the bug was the ORDER of the exit and
+        the status, not the wording of either."""
+        import json
+        from agentic_review import review as pr
+        said = []
+        monkeypatch.setattr(pr, "pr_diff", lambda *a: ("", [], pr._Skipped(["a.png", "b.lock"])))
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "d" * 40}}))
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr.status, "nothing_to_review",
+                            lambda repo, sha, why: said.append((repo, sha, why)))
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+        assert said == [("app", "d" * 40, "2 generated/binary file(s), nothing else changed")]
