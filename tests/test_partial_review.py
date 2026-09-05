@@ -27,6 +27,13 @@ def _file(path, body_lines=20):
             f"@@ -1,0 +1,{body_lines} @@\n{body}\n")
 
 
+def _paths(diffs):
+    """The paths each pass carries, in order."""
+    import re as _re
+    return [m.group(1) for d in diffs
+            for m in _re.finditer(r"^\+\+\+ b/(.+)$", d, _re.M)]
+
+
 class TestPacking:
     def _diff(self, pr, monkeypatch, blobs, cap):
         monkeypatch.setattr(pr, "gh", lambda *a, **k: "".join(blobs))
@@ -38,22 +45,60 @@ class TestPacking:
         a, b = _file("src/a.py"), _file("src/b.py")
         diff, excluded, _ = self._diff(pr, monkeypatch, [a, b], cap=len(a) + 10)
         assert "src/a.py" in diff and "src/b.py" not in diff
-        assert excluded == ["src/b.py"]
         assert diff.rstrip().endswith("+line 19 of src/a.py")
 
+    def test_what_does_not_fit_becomes_a_further_pass(self, pr, monkeypatch):
+        """The change of contract: `MAX_DIFF` is the budget for ONE review
+        call, not for the pull request. A file that does not fit is reviewed
+        next, not dropped to a skeleton."""
+        a, b = _file("src/a.py"), _file("src/b.py")
+        diff, excluded, _ = self._diff(pr, monkeypatch, [a, b], cap=len(a) + 10)
+        assert excluded == [], "a file that fits in a later pass is not excluded"
+        assert _paths(diff.overflow) == ["src/b.py"]
+        assert "src/b.py" in diff.full, "the whole diff carries every file"
+
+    def test_a_file_larger_than_a_whole_budget_gets_its_own_pass(self, pr, monkeypatch):
+        """caeli-marketing#240: `components/shop/product-pdp.tsx` was 69,366
+        chars against a 60,000 budget, so it could never fit at any packing
+        order. As the first file of its own pass it does."""
+        small, huge = _file("src/a.py"), _file("src/huge.py", body_lines=400)
+        diff, excluded, _ = self._diff(pr, monkeypatch, [small, huge],
+                                       cap=len(small) + 10)
+        assert excluded == []
+        assert _paths(diff.overflow) == ["src/huge.py"]
+        assert "line 399 of src/huge.py" in diff.overflow[0], "not split"
+
+    def test_past_the_pass_cap_a_file_IS_excluded(self, pr, monkeypatch):
+        """`MAX_PASSES` is what stops a monster PR, and what is left is still
+        named rather than silently dropped."""
+        monkeypatch.setattr(pr, "MAX_PASSES", 2)
+        a, b, c = _file("src/a.py"), _file("src/b.py"), _file("src/c.py")
+        diff, excluded, _ = self._diff(pr, monkeypatch, [a, b, c],
+                                       cap=len(a) + 10)
+        assert _paths(diff.overflow) == ["src/b.py"]
+        assert excluded == ["src/c.py"]
+
+    def test_one_pass_is_the_old_behaviour_exactly(self, pr, monkeypatch):
+        monkeypatch.setattr(pr, "MAX_PASSES", 1)
+        a, b = _file("src/a.py"), _file("src/b.py")
+        diff, excluded, _ = self._diff(pr, monkeypatch, [a, b], cap=len(a) + 10)
+        assert excluded == ["src/b.py"] and diff.overflow == []
+
     def test_source_is_packed_before_tests_and_docs(self, pr, monkeypatch):
-        """If only some of the PR fits, the source is where the defects are — a
-        test that fits while its subject does not reviews the proof and never
-        sees the claim."""
-        t, d, s = _file("tests/test_a.py"), _file("docs/x.md"), _file("src/a.py")
-        diff, excluded, _ = self._diff(pr, monkeypatch, [t, d, s], cap=len(s) + 10)
+        """If only some of the PR fits in one call, the source is where the
+        defects are — a test that fits while its subject does not reviews the
+        proof and never sees the claim."""
+        t_, d, s = _file("tests/test_a.py"), _file("docs/x.md"), _file("src/a.py")
+        diff, excluded, _ = self._diff(pr, monkeypatch, [t_, d, s], cap=len(s) + 10)
         assert "src/a.py" in diff
-        assert set(excluded) == {"tests/test_a.py", "docs/x.md"}
+        assert excluded == []
+        assert set(_paths(diff.overflow)) == {"tests/test_a.py", "docs/x.md"}
 
     def test_claude_md_is_low_priority(self, pr, monkeypatch):
         c, s = _file("CLAUDE.md"), _file("src/a.py")
         diff, excluded, _ = self._diff(pr, monkeypatch, [c, s], cap=len(s) + 10)
-        assert excluded == ["CLAUDE.md"]
+        assert "src/a.py" in diff
+        assert _paths(diff.overflow) == ["CLAUDE.md"]
 
     def test_everything_fits_means_nothing_excluded(self, pr, monkeypatch):
         a, b = _file("src/a.py"), _file("src/b.py")
