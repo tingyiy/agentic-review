@@ -26,6 +26,18 @@ MAX_DIFF = int(os.environ.get("REVIEW_MAX_DIFF", 60_000))
 #: one and pay nothing for this.
 MAX_PASSES = int(os.environ.get("REVIEW_MAX_PASSES", 3))
 
+#: A single file larger than this is not reviewable text, whatever its
+#: extension, and gets a skeleton instead of a pass.
+#:
+#: `pr_diff` keeps the first file of a pass WHATEVER its size, so a cap smaller
+#: than one file cannot produce an empty review — and multi-pass turned that
+#: rule into a guarantee that an over-budget file gets its own pass. infra#180
+#: added a 2 MB JSONL corpus: it became "pass 2 of 2: 2,084,684 chars", the
+#: transcript hit its budget on turn one, the model answered in 32 characters
+#: having made no tool calls, and the evidence guard correctly refused the
+#: whole review. Nobody was ever going to read a truncated slab of that file.
+MAX_FILE_DIFF = int(os.environ.get("REVIEW_MAX_FILE_DIFF", 2 * MAX_DIFF))
+
 #: Seconds after which no FURTHER pass is started. The job is
 #: `timeout-minutes: 25` and a pass runs 4-8 minutes, so three passes plus their
 #: revisions can outlive it — and a killed job posts NOTHING, which is worse

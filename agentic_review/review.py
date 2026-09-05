@@ -58,8 +58,8 @@ from . import github
 from . import llm
 from . import status
 from . import tracker
-from .config import (AGENT_TIMEOUT, MAX_DIFF, MAX_FINDINGS, MAX_PASSES,
-                     ORG, PASS_DEADLINE)
+from .config import (AGENT_TIMEOUT, MAX_DIFF, MAX_FILE_DIFF, MAX_FINDINGS,
+                     MAX_PASSES, ORG, PASS_DEADLINE)
 from .errors import AgentFailed, PRClosed, ReviewError, Superseded
 
 
@@ -166,6 +166,19 @@ def pr_diff(repo, pr):
             continue
         files.append((path, blob))
     files.sort(key=lambda f: bool(_LOW_PRIORITY.search(f[0])))
+    # TOO BIG FOR ANY PASS. "The first file always fits" stops a cap smaller
+    # than one file from producing an empty review, and multi-pass turned that
+    # into a promise that an over-budget file gets a pass of its own — so one
+    # 2 MB file became a 2 MB prompt, the transcript hit its budget on turn
+    # one, and the model answered in 32 characters with no tool calls
+    # (infra#180). A file this size is data: it gets a skeleton, like every
+    # other file the diff cannot show.
+    oversized = [(p, b) for p, b in files if len(b) > MAX_FILE_DIFF]
+    if oversized:
+        print(f"  {len(oversized)} file(s) over {MAX_FILE_DIFF:,} chars — "
+              f"skeleton, not a pass: {', '.join(p for p, _ in oversized)}",
+              flush=True)
+    files = [(p, b) for p, b in files if len(b) <= MAX_FILE_DIFF]
     passes, remaining = [], files
     while remaining and len(passes) < MAX_PASSES:
         kept, rest, used = [], [], 0
@@ -186,8 +199,13 @@ def pr_diff(repo, pr):
     # SHOWN meant a push confined to an over-budget file left the fingerprint
     # untouched and was skipped as "the base moved, this PR's own changes did
     # not" — a commit reviewed by nothing, again.
-    out.full = "\n".join(blob for _, blob in files)
-    return out, [p for p, _ in remaining], _Skipped(skipped_paths)
+    # `full` KEEPS THE OVERSIZED FILE. It answers "what does this PR touch"
+    # and feeds the fingerprint — dropping it there would make a push that
+    # changes only that file invisible to the nothing-new guard, which is the
+    # bug the fingerprint was widened to fix in the first place.
+    out.full = "\n".join(blob for _, blob in files + oversized)
+    return (out, [p for p, _ in remaining] + [p for p, _ in oversized],
+            _Skipped(skipped_paths))
 
 
 class _Diff(str):
@@ -735,6 +753,22 @@ def _since_note(repo, pr, head_sha, pr_paths, revs=None):
             "already present at that review. Read the new material\nfirst, then "
             "re-check what it could have broken — a later commit can break\ncode "
             "that was correct when you read it.\n")
+
+
+def _capped(diff, limit):
+    """The diff, truncated at a whole line, saying so where it stops.
+
+    The last line of defence on prompt size. `expand_hunks` falls back to the
+    un-expanded diff rather than truncating, and `pr_diff` keeps the first file
+    of a pass at any size, so before this there was no point at all where the
+    text handed to the model was bounded.
+    """
+    if len(diff) <= limit:
+        return diff
+    cut = diff[:limit].rsplit("\n", 1)[0]
+    return (cut + f"\n[diff truncated here: {len(diff):,} chars, showing "
+            f"{len(cut):,}. What is missing is the TAIL of this file — open it "
+            f"with read_file rather than assuming it is absent.]\n")
 
 
 def _other_passes_note(n, parts):
@@ -3145,7 +3179,13 @@ def main():
             # decides whether anything has changed since the last review —
             # expanding it would make every open PR look freshly changed the
             # first time this shipped.
-            shown = ctx.expand_hunks(part, work, max_chars=int(MAX_DIFF * 1.6))
+            # BELT AND BRACES. `expand_hunks` returns the ORIGINAL diff when
+            # expanding would breach the cap — `max_chars` bounds the
+            # expansion, not the prompt — so nothing downstream of `pr_diff`
+            # was guarding the size of what actually reaches the model.
+            shown = _capped(ctx.expand_hunks(part, work,
+                                             max_chars=int(MAX_DIFF * 1.6)),
+                            int(MAX_DIFF * 1.6))
             prompt = PROMPT.format(repo=repo, path=work, diff=shown,
                                    caveats=caveats + _other_passes_note(
                                        n, [str(diff)] + overflow),

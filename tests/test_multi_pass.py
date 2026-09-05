@@ -227,3 +227,69 @@ class TestItPromisesOnlyWhatTheClockCanKeep:
     def test_it_still_says_they_are_not_missing(self, monkeypatch):
         seen = _Harness().run(monkeypatch, _blob("a.py"), [_blob("b.py")])
         assert "do not report them as missing" in seen["prompts"][0]
+
+
+class TestAFileTooBigForAnyPass:
+    """infra#180 added a 2 MB JSONL corpus. "The first file always fits" made
+    it `pass 2 of 2: 2,084,684 chars`; the transcript hit its budget on turn
+    one, the model answered in 32 characters having made no tool calls, and the
+    evidence guard correctly refused the whole review. Nobody was ever going to
+    read a truncated slab of that file."""
+
+    def _diff(self, monkeypatch, blobs, cap, ceiling):
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: "".join(blobs))
+        monkeypatch.setattr(pr, "MAX_DIFF", cap)
+        monkeypatch.setattr(pr, "MAX_FILE_DIFF", ceiling)
+        return pr.pr_diff("repo", 1)
+
+    def test_it_gets_a_skeleton_not_a_pass(self, monkeypatch):
+        small, huge = _blob("a.py"), _blob("data.jsonl", lines=4000)
+        diff, excluded, _ = self._diff(monkeypatch, [small, huge],
+                                       cap=10_000, ceiling=20_000)
+        assert "data.jsonl" in excluded
+        assert all("data.jsonl" not in p for p in [str(diff)] + list(diff.overflow))
+        assert "a.py" in diff
+
+    def test_the_fingerprint_still_sees_it(self, monkeypatch):
+        """`full` answers "what does this PR touch" and feeds the mark. Dropping
+        it there would make a push that changes only that file invisible to the
+        nothing-new guard — the bug the fingerprint was widened to fix."""
+        small, huge = _blob("a.py"), _blob("data.jsonl", lines=4000)
+        diff, _, _ = self._diff(monkeypatch, [small, huge],
+                                cap=10_000, ceiling=20_000)
+        assert "data.jsonl" in diff.full
+
+    def test_a_file_under_the_ceiling_still_gets_its_own_pass(self, monkeypatch):
+        """The point of multi-pass: a big SOURCE file is still reviewed."""
+        small, big = _blob("a.py"), _blob("src/big.py", lines=300)
+        diff, excluded, _ = self._diff(monkeypatch, [small, big],
+                                       cap=len(small) + 10, ceiling=1_000_000)
+        assert excluded == [] and "src/big.py" in "".join(diff.overflow)
+
+
+class TestNothingUnboundedReachesTheModel:
+    """`expand_hunks` returns the ORIGINAL diff when expanding would breach its
+    cap — `max_chars` bounds the expansion, not the prompt — and `pr_diff`
+    keeps the first file of a pass at any size. Before this there was no point
+    at which the text handed to the model was bounded."""
+
+    def test_it_truncates_at_a_line_and_says_so(self):
+        text = "\n".join(f"+line {i}" for i in range(2000))
+        out = pr._capped(text, 500)
+        assert len(out) < 900 and out.count("\n") > 5
+        assert "diff truncated here" in out and "open it" in out
+        assert not out.split("[diff truncated")[0].endswith("+line")
+
+    def test_it_leaves_a_diff_under_the_limit_alone(self):
+        text = "+one\n+two\n"
+        assert pr._capped(text, 10_000) == text
+
+    def test_the_prompt_itself_is_capped(self, monkeypatch):
+        """The wiring, not the helper: `expand_hunks` hands back an
+        un-expanded diff of any size, so the cap has to sit at the call site or
+        a single big file reaches the model whole — which is what emptied the
+        transcript on infra#180."""
+        monkeypatch.setattr(pr, "MAX_DIFF", 1_000)
+        seen = _Harness().run(monkeypatch, _blob("big.py", lines=600), [])
+        assert "diff truncated here" in seen["prompts"][0]
+        assert len(seen["prompts"][0]) < 20_000
