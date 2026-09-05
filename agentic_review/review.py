@@ -399,13 +399,16 @@ def conversation(repo, pr):
         # default of 30 because "they never exceed it" — but the default returns
         # the OLDEST 30, so the failure is silent and lands exactly on a
         # contested PR, where the rebuttal is comment 31.
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/reviews?per_page=100", "review", 1200),
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/comments?per_page=100", "inline", 800),
-        (f"/repos/{ORG}/{repo}/issues/{pr}/comments?per_page=100", "comment", 800),
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/commits?per_page=100", "commit", 1500),
+        # PAGED, not merely `per_page=100`: these return OLDEST first, so on a
+        # contested PR the rebuttal this block exists to show is on the LAST
+        # page. Raising 30 to 100 moved that cliff rather than removing it.
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/reviews", "review", 1200),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/comments", "inline", 800),
+        (f"/repos/{ORG}/{repo}/issues/{pr}/comments", "comment", 800),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/commits", "commit", 1500),
     ):
         try:
-            for c in json.loads(gh(path)):
+            for c in _paged(path):
                 if kind == "commit":
                     # A commit is shaped differently: the prose is under
                     # `commit.message`, and the author is the committer rather
@@ -480,6 +483,211 @@ def conversation(repo, pr):
             + "\n\n".join(out) + "\n")
 
 
+#: A fuse against a pathological thread, not a budget: 20 pages is 2,000 items.
+MAX_PAGES = 20
+
+
+class _Paged(list):
+    """A paged list that knows whether it is the WHOLE list.
+
+    The fuse stops at `MAX_PAGES`, and these endpoints are oldest-first — so a
+    thread long enough to hit it returns the 2,000 OLDEST items and silently
+    drops every newer one. That is the precise failure paging exists to fix,
+    one threshold higher, and a caller that anchors on "the newest review"
+    would anchor on a stale one and report already-reviewed files as new. So
+    say it, and let each caller decide.
+    """
+    truncated = False
+
+
+def _paged(path, page_cap=None):
+    """Every item of a list endpoint, oldest first. Raises what `gh` raises.
+
+    `per_page=100` IS A CEILING, NOT PAGINATION — the mistake this file has
+    made twice. GitHub returns these lists OLDEST first, so the newest item,
+    which is the one every caller here actually wants, is on the LAST page. A
+    PR with 101 reviews fails exactly as one with 31 did before the ceiling was
+    raised. A short page means the end.
+    """
+    # Resolved here, not in the signature: a default bound at import time
+    # cannot be changed, and the fuse is the one thing a test has to move.
+    page_cap = MAX_PAGES if page_cap is None else page_cap
+    sep = "&" if "?" in path else "?"
+    out = _Paged()
+    for page in range(1, page_cap + 1):
+        items = json.loads(gh(f"{path}{sep}per_page=100&page={page}"))
+        if not isinstance(items, list):
+            break
+        out.extend(items)
+        if len(items) < 100:
+            return out
+    # Fell out of the loop with a full last page: there is more, and what is
+    # missing is the newest of it.
+    out.truncated = True
+    print(f"[pr-review] {path} stopped at the {page_cap}-page fuse — "
+          f"the newest items are missing", flush=True)
+    return out
+
+
+def _reviews(repo, pr):
+    """Every review on the PR. Never raises; unreadable is indistinguishable
+    from none, and both callers treat the two the same way — one reviews, the
+    other stays quiet."""
+    try:
+        return _paged(f"/repos/{ORG}/{repo}/pulls/{pr}/reviews")
+    except Exception as e:  # noqa: BLE001 — unanswerable means "review it"
+        print(f"[pr-review] could not read prior reviews ({type(e).__name__})")
+        return []
+
+
+#: The sha a past review says it READ, recovered from its own body.
+#:
+#: NOT `commit_id`: GitHub stamps that with the head at POST time, so a push
+#: that lands mid-run re-attributes a review to code it never saw (measured on
+#: slack-app#348). The body is the honest record — every review renders one of
+#: these two forms — and `commit_id` is only the fallback for a review posted
+#: before they existed.
+_READ_AT = re.compile(r"(?:It read|read the change at) `([0-9a-f]{7,40})`")
+
+#: Paths listed before the tail is summarised. Long enough for a normal round
+#: of fixes, short enough that a rebase onto a moved base cannot flood the
+#: prompt with the whole PR.
+MAX_SINCE_PATHS = 40
+
+
+def _read_sha(review):
+    """The sha THIS review looked at: its body first, `commit_id` after.
+
+    GitHub stamps `commit_id` with the head at POST time, so a push landing
+    mid-run re-attributes a review to a commit it never read (slack-app#348).
+    Every skip below that compares a review to the current head has to ask the
+    body, or a commit that nothing has read is skipped as already reviewed —
+    and that commit is exactly the one a mid-run push produced.
+    """
+    if not isinstance(review, dict):
+        return ""
+    found = _READ_AT.findall(review.get("body") or "")
+    return found[-1] if found else (review.get("commit_id") or "")
+
+
+def _reviewed_this_head(review, head_sha):
+    """Did this review read the commit we are looking at? Abbreviations count
+    — the body carries seven characters, the API forty."""
+    sha = _read_sha(review)
+    return bool(sha and (head_sha or "").startswith(sha))
+
+
+def _last_review_read(mine):
+    """The sha the most recent of our own reviews looked at, or "".
+
+    THE LAST MATCH, not the first. The footer that carries this is the last
+    line of the body, and everything above it is findings — a finding that
+    quotes the phrase (this file now contains it) would otherwise anchor the
+    comparison at whatever sha it quoted.
+    """
+    if not mine:
+        return ""
+    last = max(mine, key=lambda r: r.get("submitted_at") or "")
+    return _read_sha(last)
+
+
+#: GitHub's compare endpoint returns at most this many files, with no flag
+#: saying it truncated. At the cap the list is no longer "the only parts that
+#: moved", and a prompt that says it is points the reviewer AWAY from real new
+#: work — so the wording changes instead of the list being trusted.
+COMPARE_FILE_CAP = 300
+
+
+def changed_since_last_review(repo, pr, head_sha, pr_paths, revs=None):
+    """Which of this PR's files have moved since we last looked. Never raises.
+
+    THE DIFF IS ALWAYS THE WHOLE PULL REQUEST. Round two is handed A, B, C and
+    D with nothing saying that C and D arrived after round one — the model has
+    to infer it from the order of the conversation block, and a truncated older
+    review body takes even that away. So say it outright.
+
+    It does not license skipping A and B: a later commit can break code that
+    was fine when it was read, and the round still reviews everything. What it
+    changes is where the attention goes first, and it stops the reviewer
+    presenting an already-answered file as though it were new material.
+
+    INTERSECTED WITH THE PR'S OWN PATHS. `compare` between two heads of the
+    same branch also carries whatever arrived from the base when the author
+    merged main — those files really did change in the tree, and they are
+    nobody's new work. The PR diff is `merge-base(base, head)..head`, so they
+    are absent from it, and intersecting removes exactly that noise.
+
+    NOTHING HERE MAY RAISE. It is context, and `main` calls it inline: a shape
+    surprise anywhere in the parsing — a null payload, a truthy non-object
+    `user`, a `files` value that is not a list — would abort a whole review to
+    save a line of prompt.
+    """
+    try:
+        return _since_note(repo, pr, head_sha, pr_paths, revs)
+    except Exception as e:  # noqa: BLE001 — context, never a reason to stop
+        print(f"[pr-review] could not build the since-list "
+              f"({type(e).__name__}: {e}) — reviewing without it")
+        return ""
+
+
+def _since_note(repo, pr, head_sha, pr_paths, revs=None):
+    me = _me()
+    revs = _reviews(repo, pr) if revs is None else revs
+    mine = [r for r in (revs or [])
+            if isinstance(r, dict)
+            and (r.get("user") or {}).get("login") == me] if me else []
+    # A TRUNCATED LIST HAS THE WRONG NEWEST. Anchoring on it would name files
+    # as new that were reviewed long ago, which is worse than saying nothing.
+    if getattr(revs, "truncated", False):
+        print("[pr-review] the review list was truncated — no since-list, "
+              "rather than one anchored on a stale review")
+        return ""
+    old = _last_review_read(mine)
+    # A first review has no "since", and an abbreviated sha that prefixes the
+    # head means the last review read this very commit.
+    if not old or not isinstance(old, str) or (head_sha or "").startswith(old):
+        return ""
+    try:
+        cmp_ = json.loads(gh(f"/repos/{ORG}/{repo}/compare/{old}...{head_sha}"))
+    except Exception as e:  # noqa: BLE001 — a force-push makes `old` unreachable
+        print(f"[pr-review] could not compare {old[:7]}..{(head_sha or '')[:7]} "
+              f"({type(e).__name__}) — reviewing without a since-list")
+        return ""
+    files = (cmp_.get("files") if isinstance(cmp_, dict) else None) or []
+    want = {os.path.normpath(p) for p in (pr_paths or []) if isinstance(p, str) and p}
+    rows = []
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        name = f.get("filename") or ""
+        if isinstance(name, str) and name and os.path.normpath(name) in want:
+            rows.append((name, f.get("status") or "changed"))
+    if not rows:
+        return ""
+    rows.sort()
+    shown = ", ".join(f"`{n}` ({s})" for n, s in rows[:MAX_SINCE_PATHS])
+    if len(rows) > MAX_SINCE_PATHS:
+        shown += f", and {len(rows) - MAX_SINCE_PATHS} more"
+    # AT THE CAP, THE LIST IS NOT THE WHOLE ANSWER and must not claim to be.
+    partial = len(files) >= COMPARE_FILE_CAP
+    lead = ("these are AT LEAST the parts of it that have moved since you\n"
+            "last looked (GitHub stops listing at "
+            f"{COMPARE_FILE_CAP} files, and this comparison hit that\nlimit): "
+            if partial else
+            "these are the only parts of it that have moved since you\n"
+            "last looked: ")
+    print(f"  since `{old[:7]}`: {len(rows)} of this PR's file(s) changed"
+          + (" (compare list truncated)" if partial else ""), flush=True)
+    # "ALREADY PRESENT", NOT "ALREADY REVIEWED": a partial review leaves files
+    # unopened and says so in its own caveat, and claiming coverage here would
+    # contradict that warning on the very next round.
+    return ("\nNEW SINCE YOUR LAST REVIEW at `" + old[:7] + "` — the diff above is "
+            "the WHOLE\npull request; " + lead + shown + ".\nEverything else was "
+            "already present at that review. Read the new material\nfirst, then "
+            "re-check what it could have broken — a later commit can break\ncode "
+            "that was correct when you read it.\n")
+
+
 REVIEWER_SYSTEM = """You are a senior engineer reviewing a colleague's pull
 request. You are sitting IN a checkout of the repository and you have three
 tools: read_file, grep and list_files. Use them.
@@ -505,8 +713,7 @@ def commit_messages(repo, pr):
     """
     try:
         return [((c.get("commit") or {}).get("message") or "")
-                for c in json.loads(
-                    gh(f"/repos/{ORG}/{repo}/pulls/{pr}/commits?per_page=100"))]
+                for c in _paged(f"/repos/{ORG}/{repo}/pulls/{pr}/commits")]
     except Exception as e:  # noqa: BLE001 — context, never a reason to stop
         print(f"[pr-review] could not read commits: {type(e).__name__}: {e}")
         return []
@@ -1698,6 +1905,18 @@ def _diff_paths(diff):
                                            re.M)} - {"dev/null"}
 
 
+def _diff_paths_with_deletions(diff):
+    """`_diff_paths` plus the files the diff DELETES.
+
+    A deletion's `+++` line is `/dev/null`, so `_diff_paths` deliberately
+    returns nothing for it — which is right for "what can be read at head" and
+    wrong for "what does this PR touch". Anything intersecting a list of paths
+    against the PR would silently drop every removal.
+    """
+    gone = {m.group(1) for m in re.finditer(r"^--- a/(.+)$", diff or "", re.M)}
+    return (_diff_paths(diff) | gone) - {"dev/null"}
+
+
 def review_findings(prompt, work, repo=""):
     """The findings for a change, with an EMPTY result confirmed by a second run.
 
@@ -2039,9 +2258,18 @@ def _verdict_withheld(body, event):
     nobody had checked.
     """
     verdict = event.lower().replace("_", " ")
-    note = (f"> **⚠️ GitHub would not record a `{verdict}` from this account.** "
-            f"The findings below stand; the verdict does not. Nothing here has "
-            f"been recorded as an approval.\n\n")
+    # "a `approve`" — the article has to follow the verdict, and the closing
+    # sentence has to as well: "nothing has been recorded as an approval" is
+    # the load-bearing line under a refused APPROVE and a non-sequitur under a
+    # refused REQUEST_CHANGES, where what the reader needs to know is that
+    # nothing is blocking them.
+    article = "an" if verdict[:1] in "aeiou" else "a"
+    tail = ("Nothing here has been recorded as an approval."
+            if event.upper() == "APPROVE" else
+            "Nothing here blocks the merge.")
+    note = (f"> **⚠️ GitHub would not record {article} `{verdict}` from this "
+            f"account.** The findings below stand; the verdict does not. "
+            f"{tail}\n\n")
     cleaned = body.replace("### AI review — no findings\n",
                            "### AI review — no findings, verdict not recorded\n")
     cleaned = cleaned.replace(
@@ -2538,51 +2766,41 @@ def _someone_replied_since(repo, pr, when):
                  f"/repos/{ORG}/{repo}/pulls/{pr}/comments",
                  f"/repos/{ORG}/{repo}/pulls/{pr}/reviews",
                  f"/repos/{ORG}/{repo}/pulls/{pr}/commits"):
-        # PAGE THROUGH, because `per_page=100` is a ceiling and not pagination.
-        # `gh()` does not paginate and ALL FOUR of these return OLDEST-first —
-        # measured on infra#134, whose /commits page starts at 16:17 and ends at
-        # 00:30 the next day. So the newest item, which is where a rebuttal
-        # lands, is on the LAST page. Raising 30 to 100 moved the cliff rather
-        # than removing it; a contested PR with 101 comments would fail exactly
-        # as one with 31 did.
-        #
-        # A short page means the end. `page_cap` is a fuse against a pathological
-        # thread, not a budget — at 100 an item it is 2,000 of them.
-        page = 1
-        while page <= 20:
-            try:
-                items = json.loads(gh(f"{base}?per_page=100&page={page}"))
-            except Exception as e:  # noqa: BLE001 — unanswerable means "no reply"
-                print(f"[pr-review] could not read {base.rsplit('/', 1)[-1]}: "
-                      f"{type(e).__name__}")
-                break
-            for c in items:
-                if base.endswith("/commits"):
-                    # A MERGE COMMIT IS NOT A REPLY. update-branch is a
-                    # `synchronize` whose merge commit has two parents and a
-                    # prose body, so counting it would make every update-branch
-                    # look like an argument and defeat the same-diff skip this
-                    # guard was built around. Only a single-parent commit — the
-                    # answer-only commit — counts.
-                    if len(c.get("parents") or []) > 1:
-                        continue
-                    d = c.get("commit") or {}
-                    who = ((c.get("author") or {}).get("login")
-                           or (d.get("author") or {}).get("name") or "")
-                    if who == _me() or not (d.get("message") or "").strip():
-                        continue
-                    newest = max(newest, (d.get("author") or {}).get("date") or "")
+        # PAGED, because `per_page=100` is a ceiling and not pagination: these
+        # return OLDEST-first (measured on infra#134, whose /commits page starts
+        # at 16:17 and ends at 00:30 the next day), so the rebuttal this guard
+        # exists to find is on the LAST page. `_paged` owns the mechanics; what
+        # stays here is the per-item filtering, which differs by endpoint.
+        try:
+            items = _paged(base)
+        except Exception as e:  # noqa: BLE001 — unanswerable means "no reply"
+            print(f"[pr-review] could not read {base.rsplit('/', 1)[-1]}: "
+                  f"{type(e).__name__}")
+            continue
+        for c in items:
+            if base.endswith("/commits"):
+                # A MERGE COMMIT IS NOT A REPLY. update-branch is a
+                # `synchronize` whose merge commit has two parents and a
+                # prose body, so counting it would make every update-branch
+                # look like an argument and defeat the same-diff skip this
+                # guard was built around. Only a single-parent commit — the
+                # answer-only commit — counts.
+                if len(c.get("parents") or []) > 1:
                     continue
-                # OUR OWN posts do not count. The last review is by definition
-                # newer than the one before it, so counting ours would make
-                # every re-request look like a fresh argument and defeat the
-                # guard entirely.
-                if (c.get("user") or {}).get("login") == _me():
+                d = c.get("commit") or {}
+                who = ((c.get("author") or {}).get("login")
+                       or (d.get("author") or {}).get("name") or "")
+                if who == _me() or not (d.get("message") or "").strip():
                     continue
-                newest = max(newest, c.get("submitted_at") or c.get("created_at") or "")
-            if len(items) < 100:
-                break
-            page += 1
+                newest = max(newest, (d.get("author") or {}).get("date") or "")
+                continue
+            # OUR OWN posts do not count. The last review is by definition
+            # newer than the one before it, so counting ours would make
+            # every re-request look like a fresh argument and defeat the
+            # guard entirely.
+            if (c.get("user") or {}).get("login") == _me():
+                continue
+            newest = max(newest, c.get("submitted_at") or c.get("created_at") or "")
     return bool(newest and newest > when)
 
 
@@ -2602,7 +2820,8 @@ def _metadata_findings_now(title, commits, body):
             checks.ticket_in_title(title) + checks.agent_session_url(commits, body)}
 
 
-def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body=""):
+def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body="",
+                     revs=None):
     """Has this exact state already been reviewed? Returns a reason, or None.
 
     TWO WAYS NOTHING IS NEW, and both were costing a full agent run:
@@ -2620,12 +2839,7 @@ def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body=""):
     correctly declines to skip — the re-request arrow still works, which is the
     property `_release_review_request` exists to protect.
     """
-    try:
-        revs = json.loads(gh(f"/repos/{ORG}/{repo}/pulls/{pr}/reviews"))
-    except Exception as e:  # noqa: BLE001 — unanswerable means "review it"
-        print(f"[pr-review] could not read prior reviews ({type(e).__name__}) "
-              "— reviewing rather than assuming nothing changed")
-        return None
+    revs = _reviews(repo, pr) if revs is None else revs
     me = _me()
     mine = [r for r in revs if (r.get("user") or {}).get("login") == me] if me else []
     if not mine:
@@ -2637,7 +2851,7 @@ def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body=""):
     # re-look can only add noise to a verdict already given. An edit, a
     # comment, a re-request — none of them change the code the approval was
     # for. A new commit does, and `synchronize` brings it here as a new head.
-    if any(r.get("state") == "APPROVED" and r.get("commit_id") == head_sha
+    if any(r.get("state") == "APPROVED" and _reviewed_this_head(r, head_sha)
            for r in mine):
         return (f"approved at this commit ({head_sha[:7]}) — only a new "
                 "commit is reviewed again")
@@ -2661,7 +2875,11 @@ def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body=""):
             print(f"[pr-review] metadata finding(s) since fixed: "
                   f"{'; '.join(cleared)} — reviewing again rather than skipping")
             return None
-    if any(r.get("commit_id") == head_sha for r in mine):
+    # THE SHA IN THE BODY, NOT `commit_id`. A review posted while a push landed
+    # is stamped with the NEW head although it read the old one; keying the skip
+    # on the stamp meant that new commit was never reviewed by anything — it
+    # arrived already marked as done.
+    if any(_reviewed_this_head(r, head_sha) for r in mine):
         return f"this exact commit ({head_sha[:7]}) already has a review"
     want = _DIFF_MARK.format(fp=_diff_fp(diff))
     if want in (last.get("body") or ""):
@@ -2721,10 +2939,13 @@ def main():
 
     # NOTHING NEW, NOTHING TO SAY — checked here, before the checkout and the
     # multi-minute agent run, because the whole point is not to spend them.
+    # ONE fetch, two readers: the nothing-new guard and the since-list ask the
+    # same endpoint the same question minutes apart.
+    revs = _reviews(repo, pr)
     nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], diff,
                                     title=meta.get("title") or "",
                                     commits=commit_messages(repo, pr),
-                                    body=meta.get("body") or "")
+                                    body=meta.get("body") or "", revs=revs)
     if nothing_new:
         print(f"nothing new to review: {nothing_new}")
         return
@@ -2760,7 +2981,11 @@ def main():
         prompt = PROMPT.format(repo=repo, path=work, diff=shown, caveats=caveats,
                                context=build_context(repo, pr, meta, work, changed,
                                                      diff, pr_paths),
-                               prior=conversation(repo, pr))
+                               prior=conversation(repo, pr)
+                               + changed_since_last_review(
+                                   repo, pr, meta["head"]["sha"],
+                                   list(_diff_paths_with_deletions(diff))
+                                   + pr_paths, revs=revs))
         findings = review_findings(prompt, work, repo)
         # ONE pass that drops, corrects and adds — against the conversation that
         # already read the code, so it costs a single call and no traversal.
