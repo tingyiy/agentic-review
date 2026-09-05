@@ -243,22 +243,34 @@ class TestItReadsEverywhereARebuttalLands:
         return [{"user": {"login": BOT}, "commit_id": SHA, "body": "",
                  "submitted_at": when}]
 
-    def test_it_PAGES_rather_than_raising_a_ceiling(self, pr):
+    def test_it_PAGES_rather_than_raising_a_ceiling(self, pr, monkeypatch):
         """`per_page=100` alone is a ceiling, not pagination.
 
         `gh()` does not paginate and all four endpoints return OLDEST-first —
         measured on infra#134, whose /commits page starts at 16:17 and ends at
         00:30 the next day. So the newest item, which is where a rebuttal
-        lands, is on the LAST page. Going 30 → 100 moved the cliff instead of
+        lands, is on the LAST page. Going 30 to 100 moved the cliff instead of
         removing it: a PR with 101 comments would have failed exactly as one
-        with 31 did. The previous version of this test asserted the ceiling,
-        and so encoded the gap it was meant to close.
+        with 31 did.
+
+        DRIVEN, not read: this test used to assert on the source text of the
+        function, which passes while behaviour changes under it and fails when
+        the code merely moves — as it did the day the page loop became a shared
+        helper.
         """
         m, _ = pr
-        import inspect
-        src = inspect.getsource(m._someone_replied_since)
-        assert "page=" in src and "page += 1" in src, "still a single page"
-        assert "len(items) < 100" in src, "no short-page stop"
+        pages = []
+        full = [{"user": {"login": "octocat"},
+                 "created_at": "2026-08-30T01:00:00Z"}] * 100
+
+        def gh(path, **k):
+            if "/pulls/1/comments" in path:
+                pages.append(path)
+                return json.dumps(full if "&page=1" in path else [])
+            return json.dumps([])
+        monkeypatch.setattr(m, "gh", gh)
+        m._someone_replied_since("r", 1, "2026-08-31T10:00:00Z")
+        assert any("&page=2" in p for p in pages), "stopped at the ceiling"
 
     def test_it_reads_a_reply_on_the_SECOND_page(self, pr, monkeypatch):
         """The failure the ceiling left behind, driven end to end."""

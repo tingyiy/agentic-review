@@ -386,3 +386,78 @@ class TestTheWiringInMain:
             [{"filename": "gone.ts", "status": "removed"}],
             diff=self.DELETION)
         assert "`gone.ts` (removed)" in prompt
+
+
+class TestATruncatedListIsNotAnAnchor:
+    """`_paged` stops at a fuse, and these endpoints are oldest-first — so a
+    thread long enough to hit it returns the OLDEST items and drops the newest,
+    which is the one everything here anchors on."""
+
+    def _full_pages(self, monkeypatch, cap):
+        review = {"user": {"login": "bot"}, "submitted_at": "2026-01-01T00:00:00Z",
+                  "body": REVIEWED}
+
+        def gh(path, method="GET", body=None, accept=""):
+            if "/reviews" in path:
+                return json.dumps([review] * 100)
+            return json.dumps({"files": [{"filename": "c.ts", "status": "added"}]})
+        monkeypatch.setattr(pr, "gh", gh)
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        monkeypatch.setattr(pr, "MAX_PAGES", cap)
+
+    def test_paged_says_it_stopped_short(self, monkeypatch):
+        self._full_pages(monkeypatch, 3)
+        out = pr._paged("/repos/x/y/pulls/1/reviews")
+        assert out.truncated is True and len(out) == 300
+
+    def test_a_complete_list_is_not_marked_truncated(self, monkeypatch):
+        _wire(monkeypatch, [{"user": {"login": "bot"}}], [])
+        assert pr._paged("/repos/x/y/pulls/1/reviews").truncated is False
+
+    def test_no_since_list_rather_than_one_from_a_stale_review(self, monkeypatch):
+        """Naming files as new that were reviewed long ago is worse than
+        saying nothing."""
+        self._full_pages(monkeypatch, 2)
+        assert pr.changed_since_last_review("repo", 1, "b" * 40, ["c.ts"]) == ""
+
+
+class TestTheSkipReadsTheShaTheReviewSaw:
+    """GitHub stamps `commit_id` with the head at POST time. A review posted
+    while a push lands is recorded against a commit it never read — and keying
+    the skip on that stamp meant the new commit arrived already marked done and
+    was never reviewed by anything."""
+
+    def test_a_commit_the_review_never_read_is_not_skipped(self, monkeypatch):
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        monkeypatch.setattr(pr, "gh", lambda path, **kw: json.dumps(
+            [{"user": {"login": "bot"}, "commit_id": "b" * 40,
+              "submitted_at": "2026-01-01T00:00:00Z",
+              "body": "It read `aaaaaaa`."}]))
+        assert pr._already_reviewed("repo", 1, "b" * 40, "diff") is None
+
+    def test_an_approval_stamped_on_an_unread_commit_does_not_stand(self, monkeypatch):
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        monkeypatch.setattr(pr, "gh", lambda path, **kw: json.dumps(
+            [{"user": {"login": "bot"}, "commit_id": "b" * 40, "state": "APPROVED",
+              "submitted_at": "2026-01-01T00:00:00Z",
+              "body": "read the change at `aaaaaaa`, explored the code"}]))
+        assert pr._already_reviewed("repo", 1, "b" * 40, "diff") is None
+
+    def test_the_commit_it_did_read_is_still_skipped(self, monkeypatch):
+        """The half that must not break: the skip is what stops a re-request
+        re-running minutes of work for the same answer."""
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        monkeypatch.setattr(pr, "gh", lambda path, **kw: json.dumps(
+            [{"user": {"login": "bot"}, "commit_id": "b" * 40,
+              "submitted_at": "2026-01-01T00:00:00Z",
+              "body": "It read `bbbbbbb`."}]))
+        why = pr._already_reviewed("repo", 1, "b" * 40, "diff")
+        assert why and "already has a review" in why
+
+    def test_an_older_review_without_the_footer_still_uses_commit_id(self, monkeypatch):
+        monkeypatch.setattr(pr, "_me", lambda: "bot")
+        monkeypatch.setattr(pr, "gh", lambda path, **kw: json.dumps(
+            [{"user": {"login": "bot"}, "commit_id": "b" * 40,
+              "submitted_at": "2026-01-01T00:00:00Z", "body": "no footer here"}]))
+        why = pr._already_reviewed("repo", 1, "b" * 40, "diff")
+        assert why and "already has a review" in why

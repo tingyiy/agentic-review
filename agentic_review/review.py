@@ -487,7 +487,20 @@ def conversation(repo, pr):
 MAX_PAGES = 20
 
 
-def _paged(path, page_cap=MAX_PAGES):
+class _Paged(list):
+    """A paged list that knows whether it is the WHOLE list.
+
+    The fuse stops at `MAX_PAGES`, and these endpoints are oldest-first — so a
+    thread long enough to hit it returns the 2,000 OLDEST items and silently
+    drops every newer one. That is the precise failure paging exists to fix,
+    one threshold higher, and a caller that anchors on "the newest review"
+    would anchor on a stale one and report already-reviewed files as new. So
+    say it, and let each caller decide.
+    """
+    truncated = False
+
+
+def _paged(path, page_cap=None):
     """Every item of a list endpoint, oldest first. Raises what `gh` raises.
 
     `per_page=100` IS A CEILING, NOT PAGINATION — the mistake this file has
@@ -496,15 +509,23 @@ def _paged(path, page_cap=MAX_PAGES):
     PR with 101 reviews fails exactly as one with 31 did before the ceiling was
     raised. A short page means the end.
     """
+    # Resolved here, not in the signature: a default bound at import time
+    # cannot be changed, and the fuse is the one thing a test has to move.
+    page_cap = MAX_PAGES if page_cap is None else page_cap
     sep = "&" if "?" in path else "?"
-    out = []
+    out = _Paged()
     for page in range(1, page_cap + 1):
         items = json.loads(gh(f"{path}{sep}per_page=100&page={page}"))
         if not isinstance(items, list):
             break
         out.extend(items)
         if len(items) < 100:
-            break
+            return out
+    # Fell out of the loop with a full last page: there is more, and what is
+    # missing is the newest of it.
+    out.truncated = True
+    print(f"[pr-review] {path} stopped at the {page_cap}-page fuse — "
+          f"the newest items are missing", flush=True)
     return out
 
 
@@ -534,6 +555,28 @@ _READ_AT = re.compile(r"(?:It read|read the change at) `([0-9a-f]{7,40})`")
 MAX_SINCE_PATHS = 40
 
 
+def _read_sha(review):
+    """The sha THIS review looked at: its body first, `commit_id` after.
+
+    GitHub stamps `commit_id` with the head at POST time, so a push landing
+    mid-run re-attributes a review to a commit it never read (slack-app#348).
+    Every skip below that compares a review to the current head has to ask the
+    body, or a commit that nothing has read is skipped as already reviewed —
+    and that commit is exactly the one a mid-run push produced.
+    """
+    if not isinstance(review, dict):
+        return ""
+    found = _READ_AT.findall(review.get("body") or "")
+    return found[-1] if found else (review.get("commit_id") or "")
+
+
+def _reviewed_this_head(review, head_sha):
+    """Did this review read the commit we are looking at? Abbreviations count
+    — the body carries seven characters, the API forty."""
+    sha = _read_sha(review)
+    return bool(sha and (head_sha or "").startswith(sha))
+
+
 def _last_review_read(mine):
     """The sha the most recent of our own reviews looked at, or "".
 
@@ -545,8 +588,7 @@ def _last_review_read(mine):
     if not mine:
         return ""
     last = max(mine, key=lambda r: r.get("submitted_at") or "")
-    found = _READ_AT.findall(last.get("body") or "")
-    return found[-1] if found else (last.get("commit_id") or "")
+    return _read_sha(last)
 
 
 #: GitHub's compare endpoint returns at most this many files, with no flag
@@ -594,6 +636,12 @@ def _since_note(repo, pr, head_sha, pr_paths, revs=None):
     mine = [r for r in (revs or [])
             if isinstance(r, dict)
             and (r.get("user") or {}).get("login") == me] if me else []
+    # A TRUNCATED LIST HAS THE WRONG NEWEST. Anchoring on it would name files
+    # as new that were reviewed long ago, which is worse than saying nothing.
+    if getattr(revs, "truncated", False):
+        print("[pr-review] the review list was truncated — no since-list, "
+              "rather than one anchored on a stale review")
+        return ""
     old = _last_review_read(mine)
     # A first review has no "since", and an abbreviated sha that prefixes the
     # head means the last review read this very commit.
@@ -2718,51 +2766,41 @@ def _someone_replied_since(repo, pr, when):
                  f"/repos/{ORG}/{repo}/pulls/{pr}/comments",
                  f"/repos/{ORG}/{repo}/pulls/{pr}/reviews",
                  f"/repos/{ORG}/{repo}/pulls/{pr}/commits"):
-        # PAGE THROUGH, because `per_page=100` is a ceiling and not pagination.
-        # `gh()` does not paginate and ALL FOUR of these return OLDEST-first —
-        # measured on infra#134, whose /commits page starts at 16:17 and ends at
-        # 00:30 the next day. So the newest item, which is where a rebuttal
-        # lands, is on the LAST page. Raising 30 to 100 moved the cliff rather
-        # than removing it; a contested PR with 101 comments would fail exactly
-        # as one with 31 did.
-        #
-        # A short page means the end. `page_cap` is a fuse against a pathological
-        # thread, not a budget — at 100 an item it is 2,000 of them.
-        page = 1
-        while page <= 20:
-            try:
-                items = json.loads(gh(f"{base}?per_page=100&page={page}"))
-            except Exception as e:  # noqa: BLE001 — unanswerable means "no reply"
-                print(f"[pr-review] could not read {base.rsplit('/', 1)[-1]}: "
-                      f"{type(e).__name__}")
-                break
-            for c in items:
-                if base.endswith("/commits"):
-                    # A MERGE COMMIT IS NOT A REPLY. update-branch is a
-                    # `synchronize` whose merge commit has two parents and a
-                    # prose body, so counting it would make every update-branch
-                    # look like an argument and defeat the same-diff skip this
-                    # guard was built around. Only a single-parent commit — the
-                    # answer-only commit — counts.
-                    if len(c.get("parents") or []) > 1:
-                        continue
-                    d = c.get("commit") or {}
-                    who = ((c.get("author") or {}).get("login")
-                           or (d.get("author") or {}).get("name") or "")
-                    if who == _me() or not (d.get("message") or "").strip():
-                        continue
-                    newest = max(newest, (d.get("author") or {}).get("date") or "")
+        # PAGED, because `per_page=100` is a ceiling and not pagination: these
+        # return OLDEST-first (measured on infra#134, whose /commits page starts
+        # at 16:17 and ends at 00:30 the next day), so the rebuttal this guard
+        # exists to find is on the LAST page. `_paged` owns the mechanics; what
+        # stays here is the per-item filtering, which differs by endpoint.
+        try:
+            items = _paged(base)
+        except Exception as e:  # noqa: BLE001 — unanswerable means "no reply"
+            print(f"[pr-review] could not read {base.rsplit('/', 1)[-1]}: "
+                  f"{type(e).__name__}")
+            continue
+        for c in items:
+            if base.endswith("/commits"):
+                # A MERGE COMMIT IS NOT A REPLY. update-branch is a
+                # `synchronize` whose merge commit has two parents and a
+                # prose body, so counting it would make every update-branch
+                # look like an argument and defeat the same-diff skip this
+                # guard was built around. Only a single-parent commit — the
+                # answer-only commit — counts.
+                if len(c.get("parents") or []) > 1:
                     continue
-                # OUR OWN posts do not count. The last review is by definition
-                # newer than the one before it, so counting ours would make
-                # every re-request look like a fresh argument and defeat the
-                # guard entirely.
-                if (c.get("user") or {}).get("login") == _me():
+                d = c.get("commit") or {}
+                who = ((c.get("author") or {}).get("login")
+                       or (d.get("author") or {}).get("name") or "")
+                if who == _me() or not (d.get("message") or "").strip():
                     continue
-                newest = max(newest, c.get("submitted_at") or c.get("created_at") or "")
-            if len(items) < 100:
-                break
-            page += 1
+                newest = max(newest, (d.get("author") or {}).get("date") or "")
+                continue
+            # OUR OWN posts do not count. The last review is by definition
+            # newer than the one before it, so counting ours would make
+            # every re-request look like a fresh argument and defeat the
+            # guard entirely.
+            if (c.get("user") or {}).get("login") == _me():
+                continue
+            newest = max(newest, c.get("submitted_at") or c.get("created_at") or "")
     return bool(newest and newest > when)
 
 
@@ -2813,7 +2851,7 @@ def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body="",
     # re-look can only add noise to a verdict already given. An edit, a
     # comment, a re-request — none of them change the code the approval was
     # for. A new commit does, and `synchronize` brings it here as a new head.
-    if any(r.get("state") == "APPROVED" and r.get("commit_id") == head_sha
+    if any(r.get("state") == "APPROVED" and _reviewed_this_head(r, head_sha)
            for r in mine):
         return (f"approved at this commit ({head_sha[:7]}) — only a new "
                 "commit is reviewed again")
@@ -2837,7 +2875,11 @@ def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body="",
             print(f"[pr-review] metadata finding(s) since fixed: "
                   f"{'; '.join(cleared)} — reviewing again rather than skipping")
             return None
-    if any(r.get("commit_id") == head_sha for r in mine):
+    # THE SHA IN THE BODY, NOT `commit_id`. A review posted while a push landed
+    # is stamped with the NEW head although it read the old one; keying the skip
+    # on the stamp meant that new commit was never reviewed by anything — it
+    # arrived already marked as done.
+    if any(_reviewed_this_head(r, head_sha) for r in mine):
         return f"this exact commit ({head_sha[:7]}) already has a review"
     want = _DIFF_MARK.format(fp=_diff_fp(diff))
     if want in (last.get("body") or ""):
