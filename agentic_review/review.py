@@ -204,6 +204,7 @@ def pr_diff(repo, pr):
     # changes only that file invisible to the nothing-new guard, which is the
     # bug the fingerprint was widened to fix in the first place.
     out.full = "\n".join(blob for _, blob in files + oversized)
+    out.oversized = [p for p, _ in oversized]
     return (out, [p for p, _ in remaining] + [p for p, _ in oversized],
             _Skipped(skipped_paths))
 
@@ -220,6 +221,10 @@ class _Diff(str):
     overflow = ()
     #: Every file the PR touches, whichever pass shows it.
     full = ""
+    #: Of the excluded, the ones no pass could hold — over `MAX_FILE_DIFF`
+    #: rather than merely past the pass budget. They need a different knob, so
+    #: the caveat has to be able to tell them apart.
+    oversized = ()
 
     def __new__(cls, value=""):
         out = super().__new__(cls, value)
@@ -2499,6 +2504,42 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
         return f"COMMENT ({event.lower().replace('_', ' ')} refused — {why})"
 
 
+@lru_cache(maxsize=1)
+def reviewer_version():
+    """The commit of THIS reviewer, or "" when it cannot be known.
+
+    Tingyi's question, 2026-09-05, and it recovers what moving to a `deployed`
+    tag gave up. The pin used to record, in infra's git history, which version
+    judged which pull request; a tag that moves leaves only a line in a job log
+    that expires with the run. Saying it in the review body puts the answer
+    where the finding is, permanently, and makes the review corpus
+    self-describing — a finding is only interpretable against the code that
+    produced it.
+
+    `REVIEWER_SHA` first so a caller that knows can say so; otherwise ask the
+    checkout the package is sitting in, which is what the fetch step creates.
+    Never raises and never blocks: no git, no `.git`, an installed copy — all
+    mean the line is simply omitted.
+    """
+    known = os.environ.get("REVIEWER_SHA", "").strip()
+    if known:
+        return known[:7]
+    root = pathlib.Path(__file__).resolve().parent.parent
+    try:
+        out = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+    except Exception:  # noqa: BLE001 — provenance is never worth a failed review
+        return ""
+    sha = (out.stdout or "").strip()
+    return sha if out.returncode == 0 and re.fullmatch(r"[0-9a-f]{7,40}", sha) else ""
+
+
+def _version_phrase():
+    """A trailing " at `abc1234`", or nothing at all — never a guess."""
+    sha = reviewer_version()
+    return f" at `{sha}`" if sha else ""
+
+
 #: A markdown link or image, and a bare autolink. `detail` and `title` are
 #: model-written and land in the review body as RAW MARKDOWN, so these are the
 #: constructs that turn model text into something a reader can click.
@@ -2754,7 +2795,7 @@ def _changes_unseen_note():
             "is not an approval.\n\n")
 
 
-def _unreviewed_files_note(excluded):
+def _unreviewed_files_note(excluded, oversized=()):
     """Name the files this review did not read. Loud, and first.
 
     Not a footer: a person deciding whether to merge needs to see it before the
@@ -2777,8 +2818,33 @@ def _unreviewed_files_note(excluded):
             f"read them): {', '.join(shown)}{more}.\n"
             f"> This is not an approval of those files. ADVICE THAT WORKS: a "
             f"follow-up review of the same PR cuts the same files again — the "
-            f"budget is the same one — so split the PR, or raise "
-            f"`REVIEW_MAX_PASSES` (currently {MAX_PASSES}) for this repo.\n\n")
+            f"budget is the same one — so {_which_knob(excluded, oversized)}"
+            f"\n\n")
+
+
+def _which_knob(excluded, oversized):
+    """Name the setting that would actually have shown these files.
+
+    TWO DIFFERENT CEILINGS, and pointing at the wrong one is advice the reader
+    can follow to no effect — which is the failure the sentence above was
+    rewritten to stop. A file past the PASS budget needs another pass; a file
+    over `MAX_FILE_DIFF` is too big for any pass, and raising `MAX_PASSES`
+    would not move it by a byte. Found by this reviewer on the PR that added
+    the second ceiling: the fix for unactionable advice was reused verbatim one
+    branch over, where it became unactionable again.
+    """
+    big = [p for p in excluded if p in set(oversized or ())]
+    if big and len(big) == len(excluded):
+        return (f"split the file(s), or raise `REVIEW_MAX_FILE_DIFF` (currently "
+                f"{MAX_FILE_DIFF:,}) for this repo — they are larger than any "
+                f"one review pass, so more passes would not reach them.")
+    if big:
+        return (f"split the PR, and note that {', '.join(_code_span(p) for p in big[:5])} "
+                f"{'is' if len(big) == 1 else 'are'} over `REVIEW_MAX_FILE_DIFF` "
+                f"({MAX_FILE_DIFF:,}) rather than merely past the pass budget "
+                f"(`REVIEW_MAX_PASSES`, {MAX_PASSES}).")
+    return (f"split the PR, or raise `REVIEW_MAX_PASSES` (currently "
+            f"{MAX_PASSES}) for this repo.")
 
 
 def render(findings, truncated, skipped, head_sha="", repo="", diff="",
@@ -2823,7 +2889,8 @@ def render(findings, truncated, skipped, head_sha="", repo="", diff="",
     # What is fixable is the silence about which snapshot. Saying it here makes
     # a stale review self-evident instead of looking like a bad finding.
     read_at = f" It read `{head_sha[:7]}`." if head_sha else ""
-    lines.append(f"_Automated review — agentic-review ({llm.model_label()}) with "
+    lines.append(f"_Automated review — agentic-review{_version_phrase()} "
+                 f"({llm.model_label()}) with "
                  "read access to the repository at this PR's head." + read_at + " It did not run the tests"
                  + ("; " + ", ".join(notes) if notes else "") + "."
                  + _unchecked_consumers_note(repo, wire_fields) + "_")
@@ -2847,7 +2914,8 @@ APPROVAL = (
     "**What this approval is.** An agent read the change at `{head}`, explored the "
     "code around it, and found no defect it could point at. It did NOT run the "
     "tests or open the app, and it stopped looking when it was satisfied — so this "
-    "is a competent second pair of eyes, not proof the change is safe to ship.")
+    "is a competent second pair of eyes, not proof the change is safe to ship."
+    "{version}")
 
 
 def approval_body(head_sha="", repo="", wire_fields=(), diff="", excluded=()):
@@ -2857,8 +2925,13 @@ def approval_body(head_sha="", repo="", wire_fields=(), diff="", excluded=()):
     unfilled would render a literal brace to the author, and a blank one would
     assert a commit of "".
     """
-    body = (APPROVAL.replace(" at `{head}`", "") if not head_sha
-            else APPROVAL.format(head=head_sha[:7]))
+    # WHICH REVIEWER SAID SO. `{version}` renders as " It was agentic-review at
+    # `abc1234`." or as nothing — the same absent-beats-wrong rule as `{head}`.
+    version = (f" It was agentic-review{_version_phrase()}."
+               if reviewer_version() else "")
+    body = (APPROVAL.replace(" at `{head}`", "").format(version=version)
+            if not head_sha
+            else APPROVAL.format(head=head_sha[:7], version=version))
     if excluded:
         # The heading says "no findings"; the note says in what. Both true.
         body = _unreviewed_files_note(excluded) + body
@@ -3103,7 +3176,8 @@ def main():
         # deliberately committed is simply untrue. Found by this reviewer on the
         # PR that added the ceiling.
         if excluded:
-            note = _unreviewed_files_note(list(excluded))
+            note = _unreviewed_files_note(list(excluded),
+                                          getattr(diff, "oversized", ()))
             print(f"nothing reviewed: {len(excluded)} file(s) over "
                   f"{MAX_FILE_DIFF:,} chars")
             event = post_review(repo, pr, "COMMENT", note,

@@ -338,3 +338,97 @@ class TestAPRThatIsAllOversized:
         to read, and a comment on every one of those would be noise."""
         seen = self._run(monkeypatch, [])
         assert "posted" not in seen and "nothing" in seen
+
+
+class TestTheCaveatNamesTheRightKnob:
+    """Round three on the PR that added the size ceiling: the all-oversized
+    path reused the over-budget note, whose advice is "raise
+    REVIEW_MAX_PASSES". An oversized file is over MAX_FILE_DIFF, not the pass
+    budget — more passes would not move it by a byte. The fix for unactionable
+    advice, reused one branch over, became unactionable again."""
+
+    def test_all_oversized_names_the_file_ceiling(self):
+        note = pr._unreviewed_files_note(["data.jsonl"], ["data.jsonl"])
+        assert "REVIEW_MAX_FILE_DIFF" in note
+        assert "REVIEW_MAX_PASSES" not in note
+
+    def test_over_budget_still_names_the_pass_budget(self):
+        note = pr._unreviewed_files_note(["src/a.py"], [])
+        assert "REVIEW_MAX_PASSES" in note and "REVIEW_MAX_FILE_DIFF" not in note
+
+    def test_a_mix_names_both_and_says_which_is_which(self):
+        note = pr._unreviewed_files_note(["src/a.py", "data.jsonl"], ["data.jsonl"])
+        assert "REVIEW_MAX_PASSES" in note and "REVIEW_MAX_FILE_DIFF" in note
+        assert "`data.jsonl`" in note
+
+    def test_pr_diff_reports_which_files_were_oversized(self, monkeypatch):
+        monkeypatch.setattr(pr, "gh", lambda *a, **k:
+                            _blob("a.py") + _blob("data.jsonl", lines=4000))
+        monkeypatch.setattr(pr, "MAX_DIFF", 10_000)
+        monkeypatch.setattr(pr, "MAX_FILE_DIFF", 20_000)
+        diff, excluded, _ = pr.pr_diff("repo", 1)
+        assert diff.oversized == ["data.jsonl"] and excluded == ["data.jsonl"]
+
+    def test_the_all_oversized_review_carries_that_advice(self, monkeypatch):
+        seen = {}
+        d = pr._Diff("")
+        d.oversized = ["data.jsonl"]
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: (d, ["data.jsonl"], pr._Skipped([])))
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "f" * 40}}))
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr, "post_review", lambda repo, prn, event, body, **k:
+                            seen.setdefault("body", body) and "COMMENT")
+        monkeypatch.setattr(pr.status, "done", lambda *a: None)
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+        assert "REVIEW_MAX_FILE_DIFF" in seen["body"]
+
+
+class TestTheReviewSaysWhichReviewerWroteIt:
+    """Tingyi's question, 2026-09-05. Moving to a `deployed` tag gave up the
+    record of WHICH reviewer version judged a PR — a pin left that in infra's
+    git history; a moving tag leaves only a job-log line that expires. Saying
+    it in the body puts the answer where the finding is, permanently."""
+
+    def test_the_findings_footer_carries_it(self, monkeypatch):
+        monkeypatch.setattr(pr, "reviewer_version", lambda: "abc1234")
+        body = pr.render([{"file": "a.py", "line": 1, "severity": "low",
+                           "title": "t", "detail": "d"}], False, 0,
+                         head_sha="b" * 40, repo="x")
+        assert "agentic-review at `abc1234`" in body
+
+    def test_the_approval_carries_it_too(self, monkeypatch):
+        """The verdict that unblocks a merge is the one worth attributing."""
+        monkeypatch.setattr(pr, "reviewer_version", lambda: "abc1234")
+        assert "It was agentic-review at `abc1234`." in pr.approval_body("a" * 40)
+
+    def test_an_unknown_version_says_nothing_rather_than_guessing(self, monkeypatch):
+        monkeypatch.setattr(pr, "reviewer_version", lambda: "")
+        body = pr.approval_body("a" * 40)
+        assert "agentic-review at" not in body and "{version}" not in body
+        assert "It was agentic-review" not in body
+
+    def test_an_approval_with_no_head_still_renders(self, monkeypatch):
+        """`{head}` is dropped by a string replace on that path — a second
+        placeholder there would have rendered as a literal brace."""
+        monkeypatch.setattr(pr, "reviewer_version", lambda: "abc1234")
+        body = pr.approval_body("")
+        assert "{" not in body and "agentic-review at `abc1234`" in body
+
+    def test_the_env_var_wins_over_git(self, monkeypatch):
+        monkeypatch.setenv("REVIEWER_SHA", "deadbee")
+        pr.reviewer_version.cache_clear()
+        assert pr.reviewer_version() == "deadbee"
+        pr.reviewer_version.cache_clear()
+
+    def test_a_git_failure_is_not_a_failed_review(self, monkeypatch):
+        monkeypatch.delenv("REVIEWER_SHA", raising=False)
+        monkeypatch.setattr(pr.subprocess, "run",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+        pr.reviewer_version.cache_clear()
+        assert pr.reviewer_version() == ""
+        pr.reviewer_version.cache_clear()
