@@ -20,6 +20,19 @@ ORG = (os.environ.get("REVIEW_ORG")
 #: prompt, not on what is reviewable.
 MAX_DIFF = int(os.environ.get("REVIEW_MAX_DIFF", 60_000))
 
+#: How many review calls one pull request may cost. The first pass takes
+#: `MAX_DIFF` chars of diff and the rest go into further passes, so this is the
+#: ceiling on a big PR rather than a budget for a normal one — most PRs fit in
+#: one and pay nothing for this.
+MAX_PASSES = int(os.environ.get("REVIEW_MAX_PASSES", 3))
+
+#: Seconds after which no FURTHER pass is started. The job is
+#: `timeout-minutes: 25` and a pass runs 4-8 minutes, so three passes plus their
+#: revisions can outlive it — and a killed job posts NOTHING, which is worse
+#: than an honest partial review. The pass already running is not interrupted;
+#: `AGENT_TIMEOUT` bounds that.
+PASS_DEADLINE = int(os.environ.get("REVIEW_PASS_DEADLINE", 780))
+
 #: More than this and a review stops being read. A reviewer that files twelve
 #: findings has said something; one that files forty has said nothing.
 MAX_FINDINGS = int(os.environ.get("REVIEW_MAX_FINDINGS", 12))

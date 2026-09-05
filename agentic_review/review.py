@@ -58,7 +58,8 @@ from . import github
 from . import llm
 from . import status
 from . import tracker
-from .config import AGENT_TIMEOUT, MAX_DIFF, MAX_FINDINGS, ORG
+from .config import (AGENT_TIMEOUT, MAX_DIFF, MAX_FINDINGS, MAX_PASSES,
+                     ORG, PASS_DEADLINE)
 from .errors import AgentFailed, PRClosed, ReviewError, Superseded
 
 
@@ -111,9 +112,25 @@ class _Skipped(list):
 def pr_diff(repo, pr):
     """The reviewable part of the diff, and — by name — what was left out.
 
-    Returns (diff, excluded, skipped): the diff shown to the model, the paths
-    of files that did NOT fit under MAX_DIFF, and the count of generated files
-    dropped on sight.
+    Returns (diff, excluded, skipped): the diff for the FIRST review pass, the
+    paths of files no pass had room for, and the count of generated files
+    dropped on sight. `diff` is a `_Diff` — a string, so every caller that
+    treats it as one still works — carrying `.overflow`, the diffs of the
+    further passes, and `.full`, every file the PR touches.
+
+    ONE GATE WAS THE WRONG SHAPE. `MAX_DIFF` used to be the budget for the
+    whole pull request, so anything past it was dropped to a skeleton and
+    named in a caveat. On caeli-marketing#240 the diff was 172,511 chars and
+    `components/shop/product-pdp.tsx` alone was 69,366 — larger than the entire
+    budget, so it could never fit at any packing order, and five files went
+    unreviewed including both test files. That is ~43k tokens against a
+    1M-token context: the budget is ours, not the model's.
+
+    So `MAX_DIFF` is the budget for ONE review call now, and what does not fit
+    goes into the next one. A file bigger than a whole budget becomes the first
+    file of its own pass, which the "never split a file, and the first file
+    always fits" rule below already handles. `MAX_PASSES` is what stops a
+    monster PR; the skeleton is what is left for whatever it cuts.
 
     WHOLE FILES ONLY. The old cap cut the concatenated diff at a character
     count, so the last file that fit arrived as half a hunk and the files after
@@ -149,15 +166,47 @@ def pr_diff(repo, pr):
             continue
         files.append((path, blob))
     files.sort(key=lambda f: bool(_LOW_PRIORITY.search(f[0])))
-    kept, excluded, used = [], [], 0
-    for path, blob in files:
-        # Never split a file; a half hunk is worse than a named omission.
-        if used + len(blob) + 1 > MAX_DIFF and kept:
-            excluded.append(path)
-            continue
-        kept.append(blob)
-        used += len(blob) + 1
-    return "\n".join(kept), excluded, _Skipped(skipped_paths)
+    passes, remaining = [], files
+    while remaining and len(passes) < MAX_PASSES:
+        kept, rest, used = [], [], 0
+        for path, blob in remaining:
+            # Never split a file; a half hunk is worse than a named omission.
+            if used + len(blob) + 1 > MAX_DIFF and kept:
+                rest.append((path, blob))
+                continue
+            kept.append(blob)
+            used += len(blob) + 1
+        passes.append("\n".join(kept))
+        remaining = rest
+    out = _Diff(passes[0] if passes else "")
+    out.overflow = passes[1:]
+    # EVERY FILE, for the questions that are about the pull request rather than
+    # about one prompt: which paths it touches, and the fingerprint that decides
+    # whether anything has changed since the last review. Hashing only what was
+    # SHOWN meant a push confined to an over-budget file left the fingerprint
+    # untouched and was skipped as "the base moved, this PR's own changes did
+    # not" — a commit reviewed by nothing, again.
+    out.full = "\n".join(blob for _, blob in files)
+    return out, [p for p, _ in remaining], _Skipped(skipped_paths)
+
+
+class _Diff(str):
+    """The first pass's diff, carrying what the other passes hold.
+
+    A STRING FIRST. Every existing caller — the fingerprint, `_diff_paths`, the
+    length in the log line — treats this as text and must keep working, and a
+    test that stubs `pr_diff` with a plain `str` must too. So the extra parts
+    are attributes with safe defaults, read through `getattr` at the call site.
+    """
+    #: Diffs for the further review passes, in order. Empty for a PR that fits.
+    overflow = ()
+    #: Every file the PR touches, whichever pass shows it.
+    full = ""
+
+    def __new__(cls, value=""):
+        out = super().__new__(cls, value)
+        out.full = str(value)
+        return out
 
 
 #: git stderr that means THE NETWORK, not the repository. Used only to word the
@@ -686,6 +735,66 @@ def _since_note(repo, pr, head_sha, pr_paths, revs=None):
             "already present at that review. Read the new material\nfirst, then "
             "re-check what it could have broken — a later commit can break\ncode "
             "that was correct when you read it.\n")
+
+
+def _other_passes_note(n, parts):
+    """What the OTHER passes are holding, named for the pass that is running.
+
+    A reviewer shown two of a change's eighteen files, with no word that the
+    rest exist, reads the two as the whole change — and says things like "this
+    helper has no caller" about a caller sitting in another pass. So each pass
+    is told the paths the others carry, and that they are being reviewed
+    separately rather than left out.
+    """
+    if len(parts) < 2:
+        return ""
+    mine = _diff_paths_with_deletions(parts[n])
+    others = sorted(set(_diff_paths_with_deletions("\n".join(parts))) - mine)
+    if not others:
+        return ""
+    # "SCHEDULED", not "will be reviewed". `PASS_DEADLINE` can cancel a later
+    # pass, and a promise the run does not keep is one the model has already
+    # shaped its findings around — it was told not to report those files as
+    # missing. What is not reached is named in the caveat, so the reader is
+    # told; the model should not have been told more than the clock can honour.
+    return ("[This change is being reviewed in " + str(len(parts)) + " parts and "
+            "this is part " + str(n + 1) + ". The other parts hold: "
+            + ", ".join(f"`{p}`" for p in others[:40])
+            + (f", and {len(others) - 40} more" if len(others) > 40 else "")
+            + ". They are SCHEDULED for their own passes — they exist and they "
+            "are part of this change, so do not report them as missing, and do "
+            "not repeat a finding that belongs to one of them. You can still open "
+            "any of them to check something this part depends on.]\n")
+
+
+def _finding_key(f):
+    """What makes two findings the same one. Deliberately coarse on the title:
+    two passes reaching the same defect from different files word it
+    differently, and the file and line are what a reader sees twice."""
+    return (str(f.get("file") or "").strip().lower(),
+            str(f.get("line") or ""),
+            re.sub(r"[^a-z0-9]+", " ", str(f.get("title") or "").lower()).strip())
+
+
+def _dedupe_findings(findings):
+    """One entry per defect, first pass wins.
+
+    Passes share the repository and the conversation, so two of them can reach
+    the same line — the second pass opening a file the first already reported
+    on is the normal case, not an edge one. Posting it twice reads as two
+    defects.
+    """
+    seen, out = set(), []
+    for f in findings:
+        key = _finding_key(f)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    if len(out) < len(findings):
+        print(f"  {len(findings) - len(out)} duplicate finding(s) across passes",
+              flush=True)
+    return out
 
 
 REVIEWER_SYSTEM = """You are a senior engineer reviewing a colleague's pull
@@ -2336,10 +2445,19 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
         # and SAY which verdict was withheld, so a clean review is not read as
         # an approval that never happened.
         post("COMMENT", _verdict_withheld(body, event))
-        # THE SAME RECONCILIATION A REAL COMMENT GETS. The fallback returned
-        # early and skipped it, so a clean review on a newer head left our own
-        # older CHANGES_REQUESTED standing — an approval would have superseded
-        # it, and this comment is what that approval turned into.
+        # THE SAME RECONCILIATION A REAL COMMENT GETS — and for a long time it
+        # was only half of it. This branch withdrew a stale approval and did NOT
+        # dismiss a stale block, while `_dismiss_stale_block` returns early on
+        # any event that is not "COMMENT" — so it was handed "APPROVE", the
+        # verdict GitHub had just refused, and did nothing. On a token that may
+        # not approve (every GitHub-hosted run) a clean review could therefore
+        # never clear this reviewer's own earlier CHANGES_REQUESTED, and the PR
+        # stayed blocked by a finding that was already fixed. Seen on this
+        # repository's own #10.
+        #
+        # "COMMENT" IS THE HONEST EVENT HERE: it is what GitHub recorded.
+        for rid in _dismiss_stale_block(repo, pr, "COMMENT", head_sha, truncated):
+            print(f"  dismissed our own stale CHANGES_REQUESTED ({rid})")
         for rid in _withdraw_stale_approval(repo, pr, head_sha):
             print(f"  withdrew our own now-stale APPROVE ({rid})")
         why = ("own PR" if SELF_REVIEW_REFUSAL in low
@@ -2607,8 +2725,14 @@ def _unreviewed_files_note(excluded):
 
     Not a footer: a person deciding whether to merge needs to see it before the
     findings, because "no findings" means something different when fifteen
-    files were never opened. The list is what makes a follow-up review possible
-    — the reader can launch one naming exactly these.
+    files were never opened.
+
+    THE LIST IS FOR A HUMAN, not for a re-request. Telling the author to ask
+    for a follow-up review was advice that could not work — the follow-up runs
+    the same budget and cuts the same files — and on caeli-marketing#240 it
+    produced exactly that loop: five files cut on every round, a follow-up
+    requested, the identical caveat back. What clears it is splitting the PR
+    or giving the reviewer more passes, so that is what it says.
     """
     if not excluded:
         return ""
@@ -2617,8 +2741,10 @@ def _unreviewed_files_note(excluded):
     return (f"> **⚠️ Partial review — {len(excluded)} changed file(s) were NOT "
             f"opened** (they did not fit the diff budget and the agent did not "
             f"read them): {', '.join(shown)}{more}.\n"
-            f"> This is not an approval of those files. Split the PR, or "
-            f"request a follow-up review naming them.\n\n")
+            f"> This is not an approval of those files. ADVICE THAT WORKS: a "
+            f"follow-up review of the same PR cuts the same files again — the "
+            f"budget is the same one — so split the PR, or raise "
+            f"`REVIEW_MAX_PASSES` (currently {MAX_PASSES}) for this repo.\n\n")
 
 
 def render(findings, truncated, skipped, head_sha="", repo="", diff="",
@@ -2929,12 +3055,19 @@ def main():
     # this; a stub or an older caller may hand over a bare int, so ask.
     pr_paths = list(excluded or []) + (list(skipped)
                                        if isinstance(skipped, list) else [])
+    # `getattr`, because a stub or an older caller hands over a plain string.
+    overflow = list(getattr(diff, "overflow", ()) or ())
+    # EVERY FILE for the questions about the pull request itself — which paths
+    # it touches, and the fingerprint that decides whether anything changed.
+    whole = getattr(diff, "full", "") or diff
     truncated = bool(excluded)
     if not diff.strip():
         print(f"nothing reviewable ({skipped} generated files skipped)")
         return
     print(f"  diff: {len(diff)} chars"
-          + (f", TRUNCATED at {MAX_DIFF}" if truncated else "")
+          + (f" (+{len(overflow)} more pass(es), {len(whole)} total)"
+             if overflow else "")
+          + (f", TRUNCATED at {MAX_PASSES} passes" if truncated else "")
           + (f", {skipped} generated file(s) skipped" if skipped else ""), flush=True)
 
     # NOTHING NEW, NOTHING TO SAY — checked here, before the checkout and the
@@ -2942,7 +3075,7 @@ def main():
     # ONE fetch, two readers: the nothing-new guard and the since-list ask the
     # same endpoint the same question minutes apart.
     revs = _reviews(repo, pr)
-    nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], diff,
+    nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], whole,
                                     title=meta.get("title") or "",
                                     commits=commit_messages(repo, pr),
                                     body=meta.get("body") or "", revs=revs)
@@ -2971,30 +3104,67 @@ def main():
             caveats += ctx.skeletons(work, excluded)
         if skipped:
             caveats += f"[{skipped} generated/binary files omitted]\n"
-        changed = _diff_paths(diff)
+        changed = _diff_paths(whole)
         # THE PROMPT GETS THE EXPANDED DIFF; everything else keeps the canonical
         # one. `_diff_paths` and the `<!-- caeli-review diff:… -->` fingerprint
         # both read `diff`, and the fingerprint is what decides whether anything
         # has changed since the last review — expanding it would make every open
         # PR look freshly changed the first time this shipped.
-        shown = ctx.expand_hunks(diff, work, max_chars=int(MAX_DIFF * 1.6))
-        prompt = PROMPT.format(repo=repo, path=work, diff=shown, caveats=caveats,
-                               context=build_context(repo, pr, meta, work, changed,
-                                                     diff, pr_paths),
-                               prior=conversation(repo, pr)
-                               + changed_since_last_review(
-                                   repo, pr, meta["head"]["sha"],
-                                   list(_diff_paths_with_deletions(diff))
-                                   + pr_paths, revs=revs))
-        findings = review_findings(prompt, work, repo)
-        # ONE pass that drops, corrects and adds — against the conversation that
-        # already read the code, so it costs a single call and no traversal.
-        findings, withdrawn = _revise(findings, work, repo)
+        # BUILT ONCE, SHARED BY EVERY PASS. The tickets, linked PRs, CI results
+        # and cross-references are properties of the change, not of one prompt —
+        # and an identical prefix is what makes the extra passes nearly free in
+        # prompt cache.
+        context = build_context(repo, pr, meta, work, changed, whole, pr_paths)
+        prior = conversation(repo, pr) + changed_since_last_review(
+            repo, pr, meta["head"]["sha"],
+            list(_diff_paths_with_deletions(whole)) + pr_paths, revs=revs)
+        started = time.time()
+        findings, withdrawn, unreached = [], [], []
+        for n, part in enumerate([str(diff)] + overflow):
+            if n and time.time() - started > PASS_DEADLINE:
+                # THE JOB DIES AT 25 MINUTES AND POSTS NOTHING. A partial review
+                # that names what it did not reach is worth more than a killed
+                # one, so the remaining passes become the caveat instead.
+                unreached += sorted(_diff_paths_with_deletions("\n".join(overflow[n - 1:])))
+                print(f"  {len(unreached)} file(s) left unreviewed: "
+                      f"{int(time.time() - started)}s spent, deadline "
+                      f"{PASS_DEADLINE}s", flush=True)
+                break
+            if n:
+                print(f"  pass {n + 1} of {len(overflow) + 1}: "
+                      f"{len(part)} chars the first pass had no room for",
+                      flush=True)
+            # THE PROMPT GETS THE EXPANDED DIFF; everything else keeps the
+            # canonical one. `_diff_paths` and the `<!-- caeli-review diff:… -->`
+            # fingerprint both read the whole diff, and the fingerprint is what
+            # decides whether anything has changed since the last review —
+            # expanding it would make every open PR look freshly changed the
+            # first time this shipped.
+            shown = ctx.expand_hunks(part, work, max_chars=int(MAX_DIFF * 1.6))
+            prompt = PROMPT.format(repo=repo, path=work, diff=shown,
+                                   caveats=caveats + _other_passes_note(
+                                       n, [str(diff)] + overflow),
+                                   context=context, prior=prior)
+            found = review_findings(prompt, work, repo)
+            # ONE pass that drops, corrects and adds — against the conversation
+            # that already read the code, so it costs a single call and no
+            # traversal. PER PASS, because it resumes that pass's conversation:
+            # revising pass one's findings inside pass three's would ask a model
+            # about code it never saw.
+            found, dropped = _revise(found, work, repo)
+            findings += found
+            withdrawn += dropped
+        findings = _dedupe_findings(findings)
+        excluded = list(excluded or []) + [p for p in unreached
+                                           if p not in (excluded or [])]
+        pr_paths = list(pr_paths or []) + [p for p in unreached
+                                          if p not in (pr_paths or [])]
+        truncated = bool(excluded)
         # After the agent's, so the model never sees them and cannot be
         # influenced into repeating or contradicting one.
         findings += checks.run_all(work, changed, title=meta.get("title") or "",
                                    commits=commit_messages(repo, pr),
-                                   pr_body=meta.get("body") or "", diff=diff)
+                                   pr_body=meta.get("body") or "", diff=whole)
 
     # UNREVIEWED MEANS UNOPENED. The agent can read anything in the checkout,
     # so a file the diff had no room for is not unreviewed if the agent went
@@ -3024,9 +3194,15 @@ def main():
 
     head_sha = meta["head"]["sha"]
     wire_fields = _CURRENT.get("wire_fields") or []
+    # `whole`, NOT the first pass. The mark written into the body is what
+    # `_already_reviewed` recomputes and compares on the next run, and it hashes
+    # `whole` — so writing a first-pass fingerprint here made the two disagree
+    # on every multi-pass PR, and the "the base moved, this PR's own changes did
+    # not" skip could never fire: every update-branch paid for a full multi-pass
+    # review. Found by this reviewer on its own PR.
     body, event = _finalize_review(findings, withdrawn, truncated, skipped,
                                    head_sha=head_sha, repo=repo,
-                                   wire_fields=wire_fields, diff=diff,
+                                   wire_fields=wire_fields, diff=whole,
                                    excluded=unopened,
                                    saw_every_change=saw_every_change)
 

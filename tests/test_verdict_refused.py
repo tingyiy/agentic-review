@@ -144,3 +144,29 @@ class TestTheFallbackReconcilesLikeARealComment:
         pr.post_review("app", 1, "APPROVE", "body", head_sha="a" * 40)
         assert [ev for ev, _ in posted] == ["APPROVE", "COMMENT"]
         assert withdrawn == ["a" * 40]
+
+
+class TestARefusedApprovalStillClearsOurOwnBlock:
+    """tingyiy/agentic-review#10, 2026-09-05: round one blocked with a 🔴,
+    round two was clean — and the PR stayed CHANGES_REQUESTED. The fallback
+    withdrew a stale approval but never dismissed a stale block, and
+    `_dismiss_stale_block` returns early on any event that is not "COMMENT", so
+    handing it the refused "APPROVE" did nothing. On a token that may not
+    approve — every GitHub-hosted run — nothing could ever clear the block."""
+
+    def _wire_dismissal(self, monkeypatch, refusal):
+        seen = {}
+        monkeypatch.setattr(pr, "_withdraw_stale_approval", lambda *a: [])
+        monkeypatch.setattr(
+            pr, "_dismiss_stale_block",
+            lambda repo, prn, event, head, trunc: seen.setdefault("event", event) and [])
+        _wire(monkeypatch, refusal)
+        return seen
+
+    def test_the_fallback_asks_to_dismiss_as_a_COMMENT(self, monkeypatch):
+        seen = self._wire_dismissal(
+            monkeypatch, '{"errors":["GitHub Apps are not permitted to approve"]}')
+        pr.post_review("app", 1, "APPROVE", "body")
+        assert seen.get("event") == "COMMENT", (
+            "the refused verdict was passed through, and the dismissal declines "
+            "every event that is not COMMENT")
