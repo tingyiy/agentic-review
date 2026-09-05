@@ -81,5 +81,23 @@ def done(repo, sha, event, summary):
     return set_status(repo, sha, "success", f"commented — {summary}")
 
 
+def nothing_to_review(repo, sha, why):
+    """There was no reviewable text, and the PR page has to say so.
+
+    caeli-marketing#243 changed `public/og-image.png` and `package-lock.json`
+    and nothing else: both are on the generated/binary skip list, so the run
+    printed "nothing reviewable" and exited in nine seconds — correctly, since
+    a text reviewer has nothing to say about a PNG. But it exited BEFORE the
+    pending status, so the pull request carried no `agentic-review` status at
+    all, which reads exactly like a reviewer that never ran. Deciding not to
+    review is a result; a result nobody can see is the quiet death this repo
+    treats as worse than a loud failure.
+
+    `success`, not `neutral`: a commit status has no neutral state, and this is
+    not a failure — there was simply nothing to read.
+    """
+    return set_status(repo, sha, "success", f"nothing to review — {why}")
+
+
 def failed(repo, sha, reason):
     return set_status(repo, sha, "error", f"review failed: {reason}")

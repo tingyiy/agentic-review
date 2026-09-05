@@ -3062,7 +3062,12 @@ def main():
     whole = getattr(diff, "full", "") or diff
     truncated = bool(excluded)
     if not diff.strip():
-        print(f"nothing reviewable ({skipped} generated files skipped)")
+        why = (f"{skipped} generated/binary file(s), nothing else changed"
+               if skipped else "no reviewable text in this change")
+        print(f"nothing reviewable ({why})")
+        # ON THE PR PAGE, not only in the log. This is the one exit that used to
+        # leave no status at all, which reads as a reviewer that never ran.
+        status.nothing_to_review(repo, meta["head"]["sha"], why)
         return
     print(f"  diff: {len(diff)} chars"
           + (f" (+{len(overflow)} more pass(es), {len(whole)} total)"
