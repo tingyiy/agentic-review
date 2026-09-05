@@ -194,3 +194,36 @@ class TestTheCaveatGivesAdviceThatWorks:
 
     def test_nothing_excluded_says_nothing(self):
         assert pr._unreviewed_files_note([]) == ""
+
+
+class TestTheMarkMatchesWhatTheGuardRecomputes:
+    """The `<!-- caeli-review diff:… -->` mark in the body is what
+    `_already_reviewed` recomputes and compares on the next run. It hashes the
+    WHOLE PR — so a first-pass fingerprint in the body made the two disagree on
+    every multi-pass PR, and the "the base moved, this PR's own changes did
+    not" skip could never fire: every update-branch paid for a full multi-pass
+    review. Found by this reviewer on the PR that added the passes."""
+
+    def test_the_body_carries_the_whole_prs_fingerprint(self, monkeypatch):
+        first, over = _blob("a.py"), _blob("b.py")
+        seen = _Harness().run(monkeypatch, first, [over])
+        whole = "\n".join([first, over])
+        assert pr._DIFF_MARK.format(fp=pr._diff_fp(whole)) in seen["posted"]
+
+    def test_and_it_is_not_the_first_pass_alone(self, monkeypatch):
+        first, over = _blob("a.py"), _blob("b.py")
+        seen = _Harness().run(monkeypatch, first, [over])
+        assert pr._DIFF_MARK.format(fp=pr._diff_fp(first)) not in seen["posted"]
+
+
+class TestItPromisesOnlyWhatTheClockCanKeep:
+    def test_the_note_does_not_guarantee_a_later_pass(self, monkeypatch):
+        """`PASS_DEADLINE` can cancel one, and the model was told not to report
+        those files as missing — a promise the run may not keep."""
+        seen = _Harness().run(monkeypatch, _blob("a.py"), [_blob("b.py")])
+        assert "ARE being reviewed" not in seen["prompts"][0]
+        assert "SCHEDULED for their own passes" in seen["prompts"][0]
+
+    def test_it_still_says_they_are_not_missing(self, monkeypatch):
+        seen = _Harness().run(monkeypatch, _blob("a.py"), [_blob("b.py")])
+        assert "do not report them as missing" in seen["prompts"][0]

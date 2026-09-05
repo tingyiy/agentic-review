@@ -752,11 +752,17 @@ def _other_passes_note(n, parts):
     others = sorted(set(_diff_paths_with_deletions("\n".join(parts))) - mine)
     if not others:
         return ""
+    # "SCHEDULED", not "will be reviewed". `PASS_DEADLINE` can cancel a later
+    # pass, and a promise the run does not keep is one the model has already
+    # shaped its findings around — it was told not to report those files as
+    # missing. What is not reached is named in the caveat, so the reader is
+    # told; the model should not have been told more than the clock can honour.
     return ("[This change is being reviewed in " + str(len(parts)) + " parts and "
             "this is part " + str(n + 1) + ". The other parts hold: "
             + ", ".join(f"`{p}`" for p in others[:40])
             + (f", and {len(others) - 40} more" if len(others) > 40 else "")
-            + ". They ARE being reviewed — do not report them as missing, and do "
+            + ". They are SCHEDULED for their own passes — they exist and they "
+            "are part of this change, so do not report them as missing, and do "
             "not repeat a finding that belongs to one of them. You can still open "
             "any of them to check something this part depends on.]\n")
 
@@ -3179,9 +3185,15 @@ def main():
 
     head_sha = meta["head"]["sha"]
     wire_fields = _CURRENT.get("wire_fields") or []
+    # `whole`, NOT the first pass. The mark written into the body is what
+    # `_already_reviewed` recomputes and compares on the next run, and it hashes
+    # `whole` — so writing a first-pass fingerprint here made the two disagree
+    # on every multi-pass PR, and the "the base moved, this PR's own changes did
+    # not" skip could never fire: every update-branch paid for a full multi-pass
+    # review. Found by this reviewer on its own PR.
     body, event = _finalize_review(findings, withdrawn, truncated, skipped,
                                    head_sha=head_sha, repo=repo,
-                                   wire_fields=wire_fields, diff=diff,
+                                   wire_fields=wire_fields, diff=whole,
                                    excluded=unopened,
                                    saw_every_change=saw_every_change)
 
