@@ -2573,7 +2573,14 @@ def _version_phrase():
 #: list), and reading those as cited would make every truncated review's block
 #: undismissable — the blanket behaviour this replaced. Finding lines open with
 #: the severity icon; caveat lines open with `>`.
-_FINDING_LINE = re.compile(r"(?m)^(?:🔴|🟡|🔵) .*$")
+#:
+#: BUILT FROM `ICON`, not typed out. The hand-written version listed 🔴 🟡 🔵
+#: and forgot ⚠️, which `normalize_severity` gives to any severity outside the
+#: vocabulary — so a block citing an unread file through an unknown-severity
+#: finding was invisible here and got dismissed. A fourth icon added later
+#: would have done it again; this cannot drift.
+_FINDING_LINE = re.compile(
+    r"(?m)^(?:" + "|".join(re.escape(i) for i in sorted(ICON.values())) + r") .*$")
 
 #: A path inside a code span, with or without a `:line` suffix. `_where_link`
 #: renders `path:line` when the finding carries a numeric line and a bare

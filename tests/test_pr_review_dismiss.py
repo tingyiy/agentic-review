@@ -682,3 +682,25 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.setattr(prr, "_me", lambda: "review-bot")
         assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
                                         unread=["data/huge.jsonl"]) == []
+
+    def test_every_severity_icon_counts_as_a_finding_line(self, pr_review):
+        """`normalize_severity` gives ⚠️ to any severity outside the vocabulary,
+        and the hand-written alternation listed only 🔴🟡🔵 — so a block citing
+        an unread file through an unknown-severity finding was invisible to the
+        guard and got dismissed. The pattern is built from ICON now, so a fifth
+        icon cannot reintroduce it."""
+        prr = pr_review
+        for icon in prr.ICON.values():
+            body = f"{icon} **a** — `data/huge.jsonl`\n"
+            assert prr._cited_files(body) == {"data/huge.jsonl"}, icon
+
+    def test_an_unknown_severity_finding_keeps_the_block(self, monkeypatch, pr_review):
+        prr = pr_review
+        body = ("🔴 **read one** — [`src/app.py:12`](http://x)\n"
+                "⚠️ **odd severity** — `data/huge.jsonl`\n")
+        monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
+            [{"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
+              "user": {"login": "review-bot"}, "body": body}]))
+        monkeypatch.setattr(prr, "_me", lambda: "review-bot")
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=["data/huge.jsonl"]) == []
