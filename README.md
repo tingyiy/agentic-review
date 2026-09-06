@@ -158,6 +158,11 @@ has not looked past.
 789 findings across 117 pull requests over nine days, in twelve repositories,
 scored on **what the author did next** rather than on how many were posted.
 
+**697 of the 789 are scored below.** The other 92 say nothing either way: 82 had
+no commit at all after the review, and 10 cite no file for a file-based proxy to
+watch — every "PR title does not name a ticket". Counting either as ignored
+would be the flattering mistake in reverse.
+
 The proxy is *did a commit after the review touch the file the finding cites*.
 It suits a workflow where a finding is answered by a push, and it is wrong in
 both directions — a fix can land in another file, and a file can change for its
@@ -165,11 +170,11 @@ own reasons — so it is reported beside a control:
 
 | | n | cited file touched afterwards |
 |---|---|---|
-| **model findings** | 659 | **91.0%** |
+| **model findings** (of 732 posted) | 659 | **91.0%** |
 | high | 38 | 100.0% |
 | medium | 243 | 93.4% |
 | low | 378 | 88.6% |
-| deterministic checks | 38 | 42.1% |
+| deterministic checks (of 57 posted) | 38 | 42.1% |
 | **control: files the same PRs changed that no review mentioned** | 1031 | **47.2%** |
 
 A **39.6-point gap**, about nineteen standard errors. The control is measured
