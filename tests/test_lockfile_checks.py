@@ -294,3 +294,30 @@ class TestTheOtherTwoExits:
         monkeypatch.delenv("DRY", raising=False)
         pr.main()
         assert "evil.example.com" in seen["diff"], "the lockfile is not fingerprinted"
+
+
+    def test_a_lockfile_only_pr_consults_the_nothing_new_guard(self, monkeypatch):
+        """It used to return before the guard, so the same finding was posted
+        again on every re-request and every comment — the noise the guard
+        exists to prevent, on the very PR shape this feature targets."""
+        import json
+        seen = {}
+        d = pr._Diff("")
+        d.full = ""
+        d.lockfiles = {"package-lock.json": NPM}
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: (d, [], pr._Skipped(["package-lock.json"])))
+        monkeypatch.setattr(pr, "_already_reviewed",
+                            lambda *a, **k: "this exact commit already has a review")
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr, "post_review",
+                            lambda *a, **k: seen.setdefault("posted", True) or "COMMENT")
+        monkeypatch.setattr(pr.status, "done", lambda *a: None)
+        monkeypatch.setattr(pr.status, "nothing_to_review", lambda *a: None)
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "a" * 40}}))
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+        assert "posted" not in seen, "re-posted a finding nothing had changed about"

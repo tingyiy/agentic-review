@@ -3366,6 +3366,23 @@ def main():
     fingerprinted = whole + "".join(
         (getattr(diff, "lockfiles", None) or {}).values())
     truncated = bool(excluded)
+    # BEFORE EVERY EXIT THAT POSTS, not just the model one. This used to sit
+    # below the empty-diff return, so a lockfile-only pull request — the case
+    # this whole check exists for — never consulted it and re-posted the same
+    # finding on every re-request and every comment. A guard that runs after
+    # one of the doors is not a guard (found by this reviewer).
+    #
+    # ONE fetch, two readers: the nothing-new guard and the since-list ask the
+    # same endpoint the same question minutes apart.
+    revs = _reviews(repo, pr)
+    nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], fingerprinted,
+                                    title=meta.get("title") or "",
+                                    commits=commit_messages(repo, pr),
+                                    body=meta.get("body") or "", revs=revs)
+    if nothing_new:
+        print(f"nothing new to review: {nothing_new}")
+        return
+
     # BEFORE THE EARLY RETURN, because the motivating case IS an empty diff.
     # caeli-marketing#243 changed an image and a `package-lock.json`: every
     # file skipped, nothing reviewable, and the lockfile check added for
@@ -3426,19 +3443,6 @@ def main():
              if overflow else "")
           + (f", TRUNCATED at {MAX_PASSES} passes" if truncated else "")
           + (f", {skipped} generated file(s) skipped" if skipped else ""), flush=True)
-
-    # NOTHING NEW, NOTHING TO SAY — checked here, before the checkout and the
-    # multi-minute agent run, because the whole point is not to spend them.
-    # ONE fetch, two readers: the nothing-new guard and the since-list ask the
-    # same endpoint the same question minutes apart.
-    revs = _reviews(repo, pr)
-    nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], fingerprinted,
-                                    title=meta.get("title") or "",
-                                    commits=commit_messages(repo, pr),
-                                    body=meta.get("body") or "", revs=revs)
-    if nothing_new:
-        print(f"nothing new to review: {nothing_new}")
-        return
 
     # ON THE PR PAGE from here on. The merge box shows only the newest run of
     # a workflow, and Copilot's automatic request starts a no-op one a second
