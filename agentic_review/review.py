@@ -3396,40 +3396,47 @@ def main():
         # saying "no reviewable text in this change" about a 2 MB file somebody
         # deliberately committed is simply untrue. Found by this reviewer on the
         # PR that added the ceiling.
-        if excluded:
-            note = _unreviewed_files_note(list(excluded),
-                                          getattr(diff, "oversized", ()))
-            print(f"nothing reviewed: {len(excluded)} file(s) over "
-                  f"{MAX_FILE_DIFF:,} chars")
-            # `unread` IS EVERY FILE HERE. This run read nothing at all, so
-            # a block about any of them is one it cannot speak for — and
-            # without this the dismissal saw an EMPTY unread set and cleared
-            # exactly those blocks, which is the false-clean the guard exists
-            # to prevent. Found by this reviewer on the PR that narrowed the
-            # guard: the main path was threaded and this early return was not.
-            event = post_review(repo, pr, "COMMENT", note,
-                                head_sha=meta["head"]["sha"], truncated=True,
-                                unread=list(excluded), pr_files=list(excluded))
-            status.done(repo, meta["head"]["sha"], event,
-                        f"{len(excluded)} file(s) too large to review")
-            return
-        if lock_findings:
-            # There IS something to say, and no model was needed to find it.
-            print(f"nothing reviewable, but {len(lock_findings)} lockfile "
-                  f"finding(s)", flush=True)
-            body = render(lock_findings, False, skipped,
-                          head_sha=meta["head"]["sha"], repo=repo,
-                          diff=fingerprinted)
+        if excluded or lock_findings:
+            # ONE EXIT, BOTH FACTS. These were two branches and `excluded`
+            # came first, so a PR with an over-ceiling file AND a lockfile
+            # finding posted only the "too large" note and dropped the
+            # dependency warning — the third placement bug on this change, and
+            # the same shape as the other two: correct code behind a return
+            # that fires first. `render` already prepends the unreviewed-files
+            # note when given `excluded`, so one body carries both.
+            if lock_findings:
+                print(f"nothing reviewable, but {len(lock_findings)} lockfile "
+                      f"finding(s)", flush=True)
+            if excluded:
+                print(f"nothing reviewed: {len(excluded)} file(s) over "
+                      f"{MAX_FILE_DIFF:,} chars", flush=True)
+            body = (render(lock_findings, False, skipped,
+                           head_sha=meta["head"]["sha"], repo=repo,
+                           diff=fingerprinted, excluded=list(excluded),
+                           oversized=getattr(diff, "oversized", ()))
+                    if lock_findings
+                    else _unreviewed_files_note(list(excluded),
+                                                getattr(diff, "oversized", ())))
+            event = review_event(lock_findings) if lock_findings else "COMMENT"
             if os.environ.get("DRY"):
                 # DRY's whole contract is that it prints what it WOULD do.
                 # This path posted anyway — a second exit that reached GitHub
                 # without passing the one guard (found by this reviewer).
-                print(f"--- would post {review_event(lock_findings)} ---\n{body}")
+                print(f"--- would post {event} ---\n{body}")
                 return
-            event = post_review(repo, pr, review_event(lock_findings), body,
-                                head_sha=meta["head"]["sha"])
-            status.done(repo, meta["head"]["sha"], event,
-                        f"{len(lock_findings)} lockfile finding(s)")
+            # `unread` IS EVERY EXCLUDED FILE HERE. This run read none of them,
+            # so a block about any is one it cannot speak for — and without
+            # this the dismissal saw an EMPTY unread set and cleared exactly
+            # those blocks, which is the false-clean the guard exists to
+            # prevent. Found by this reviewer on the PR that narrowed it.
+            event = post_review(repo, pr, event, body,
+                                head_sha=meta["head"]["sha"],
+                                truncated=bool(excluded),
+                                unread=list(excluded), pr_files=list(excluded))
+            status.done(repo, meta["head"]["sha"], event, ", ".join(filter(None, [
+                f"{len(excluded)} file(s) too large to review" if excluded else "",
+                f"{len(lock_findings)} lockfile finding(s)" if lock_findings else "",
+            ])))
             return
         why = (f"{skipped} generated/binary file(s), nothing else changed"
                if skipped else "no reviewable text in this change")

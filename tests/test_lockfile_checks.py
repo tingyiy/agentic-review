@@ -160,6 +160,16 @@ class TestItReachesTheReview:
         seen = self._drive(monkeypatch, "", {"package-lock.json": BUMP})
         assert "quiet" in seen and "body" not in seen
 
+    def test_an_oversized_file_does_not_swallow_the_lockfile_finding(
+            self, monkeypatch):
+        """`if excluded:` returned before `if lock_findings:`, so a PR with an
+        over-ceiling file AND a dependency warning posted only the "too large"
+        note. One body carries both now."""
+        seen = self._drive(monkeypatch, "", {"package-lock.json": NPM},
+                           excluded=["data/huge.jsonl"])
+        assert "not the usual registry" in seen["body"], "the warning was dropped"
+        assert "NOT opened" in seen["body"], "and the caveat must survive too"
+
     def test_a_normal_pr_reports_them_once(self, monkeypatch):
         """Computed before the early return AND passed to `run_all` would
         double every lockfile finding on a PR that has other changes."""
