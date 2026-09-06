@@ -258,8 +258,9 @@ class TestReadingThemAllUnblocksTheStaleBlock:
             return []
         monkeypatch.setattr(pr, "review_findings", review_findings)
         monkeypatch.setattr(pr, "post_review",
-                            lambda repo, n, ev, body, head_sha="", truncated=False:
-                            seen.update(truncated=truncated) or ev)
+                            lambda repo, n, ev, body, head_sha="", truncated=False,
+                            unread=(), pr_files=():
+                            seen.update(truncated=truncated, unread=list(unread)) or ev)
         monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
             {"draft": False, "state": "open", "merged": False,
              "title": "SCRUM-1 x", "user": {"login": "someone"},

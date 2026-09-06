@@ -159,7 +159,9 @@ class TestARefusedApprovalStillClearsOurOwnBlock:
         monkeypatch.setattr(pr, "_withdraw_stale_approval", lambda *a: [])
         monkeypatch.setattr(
             pr, "_dismiss_stale_block",
-            lambda repo, prn, event, head, trunc: seen.setdefault("event", event) and [])
+            lambda repo, prn, event, head, trunc, unread=(), pr_files=():
+            seen.update(event=event, unread=list(unread),
+                        pr_files=list(pr_files)) or [])
         _wire(monkeypatch, refusal)
         return seen
 
@@ -170,3 +172,16 @@ class TestARefusedApprovalStillClearsOurOwnBlock:
         assert seen.get("event") == "COMMENT", (
             "the refused verdict was passed through, and the dismissal declines "
             "every event that is not COMMENT")
+
+    def test_the_fallback_forwards_what_was_not_read(self, monkeypatch):
+        """The seam that moved: `post_review` takes `unread` and hands it on.
+        Without this, dropping the argument leaves every test green while a
+        truncated review clears a block about a file it never opened."""
+        seen = self._wire_dismissal(
+            monkeypatch, '{"errors":["GitHub Apps are not permitted to approve"]}')
+        pr.post_review("app", 1, "APPROVE", "body", unread=["data/huge.jsonl"],
+                       pr_files=["Makefile"])
+        assert seen.get("unread") == ["data/huge.jsonl"]
+        # BOTH arguments: `_cited_files` needs the second to know a cited token
+        # is a file at all, and without it the shape test comes back.
+        assert seen.get("pr_files") == ["Makefile"]

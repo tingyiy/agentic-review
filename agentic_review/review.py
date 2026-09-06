@@ -2327,7 +2327,8 @@ def _withdraw_stale_approval(repo, pr, head_sha):
     return withdrawn
 
 
-def _dismiss_stale_block(repo, pr, event, head_sha, truncated):
+def _dismiss_stale_block(repo, pr, event, head_sha, truncated, unread=(),
+                         pr_files=()):
     """Clear OUR OWN stale CHANGES_REQUESTED once the blocking finding is gone.
 
     A COMMENTED review does not clear a CHANGES_REQUESTED on GitHub — only an
@@ -2352,15 +2353,24 @@ def _dismiss_stale_block(repo, pr, event, head_sha, truncated):
     if event != "COMMENT":
         return []
     dismissed = []
-    if truncated:
-        # A truncated review never saw the whole diff, so "no high found" may
-        # only mean "did not look there". THE reported failure mode: run 1 finds
-        # a high in the tail, the author pushes something unrelated, run 2 again
-        # stops short of that region and reports mediums — and the old code
-        # cleared a live block on the strength of not having read it.
-        print("[pr-review] not dismissing: this review was truncated, so a "
-              "clean result is not evidence the earlier finding is gone")
-        return []
+    # TRUNCATION ONLY MATTERS WHERE THE BLOCK IS. A truncated review never saw
+    # the whole diff, so "no high found" may only mean "did not look there" —
+    # run 1 finds a high in the tail, the author pushes something unrelated,
+    # run 2 again stops short of that region, and the old code cleared a live
+    # block on the strength of not having read it.
+    #
+    # But a blanket refusal became a TRAP once a file could be excluded
+    # permanently: past `MAX_FILE_DIFF` a file is over the ceiling in every
+    # future review too, so every review of that PR is truncated and the block
+    # can NEVER clear itself. Seen on infra#183 — a 🔴 fixed, three later
+    # reviews clean, the PR blocked until a human dismissed it by hand
+    # (SCRUM-1293).
+    #
+    # The question was never "was this review truncated". It is "did this review
+    # READ THE FILE THE BLOCK IS ABOUT" — so the refusal is now per review,
+    # against the files this run did not read, and a block whose own file was
+    # read can clear even from a truncated review.
+    unread_paths = {os.path.normpath(p) for p in (unread or []) if p}
     me = _me()
     if not me:
         return []
@@ -2375,6 +2385,23 @@ def _dismiss_stale_block(repo, pr, event, head_sha, truncated):
             continue                              # someone else's — never ours to clear
         if r.get("state") != "CHANGES_REQUESTED":
             continue                              # already dismissed, or not a block
+        # THE FILES THAT BLOCK NAMED. Every finding renders `path:line`, so a
+        # block that points somewhere this run did not read is exactly the one
+        # a clean result cannot speak for.
+        body = r.get("body") or ""
+        cited = _cited_files(body, pr_files)
+        # EXACT MATCH, not a shape test: a token this run did not read is
+        # blind whether or not it looks like a path to a regex.
+        blind = sorted(_cited_tokens(body) & unread_paths)
+        if blind or (truncated and not cited):
+            # No parseable file means no way to tell — and an unparseable body
+            # under truncation is the case the old blanket rule was right about.
+            print(f"[pr-review] not dismissing {r.get('id')}: this review did "
+                  f"not read "
+                  + (", ".join(blind) if blind
+                     else "everything, and that block names no file it can be "
+                          "checked against"))
+            continue
         blocked_at = r.get("commit_id")
         if not blocked_at or blocked_at == head_sha:
             # The head has not moved since the block. Re-reading the same code
@@ -2439,7 +2466,8 @@ def _write_step_summary(repo, pr, event, body):
         print(f"  (could not write step summary: {e})", flush=True)
 
 
-def post_review(repo, pr, event, body, head_sha="", truncated=False):
+def post_review(repo, pr, event, body, head_sha="", truncated=False,
+                unread=(), pr_files=()):
     """POST the review; return the event actually posted.
 
     THE FALLBACK IS KEYED ON THE REASON, NOT ON THE STATUS. 422 is GitHub's
@@ -2462,7 +2490,8 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
         post(event)
         # AFTER the post, never before: dismissing first would leave a window
         # where the PR is unblocked with nothing said in its place.
-        for rid in _dismiss_stale_block(repo, pr, event, head_sha, truncated):
+        for rid in _dismiss_stale_block(repo, pr, event, head_sha, truncated,
+                                        unread=unread, pr_files=pr_files):
             print(f"  dismissed our own stale CHANGES_REQUESTED ({rid})")
         # ONLY on COMMENT. A REQUEST_CHANGES already moves our state off
         # approved on GitHub's side, so the old approval is not misleading
@@ -2496,7 +2525,8 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False):
         # repository's own #10.
         #
         # "COMMENT" IS THE HONEST EVENT HERE: it is what GitHub recorded.
-        for rid in _dismiss_stale_block(repo, pr, "COMMENT", head_sha, truncated):
+        for rid in _dismiss_stale_block(repo, pr, "COMMENT", head_sha, truncated,
+                                        unread=unread, pr_files=pr_files):
             print(f"  dismissed our own stale CHANGES_REQUESTED ({rid})")
         for rid in _withdraw_stale_approval(repo, pr, head_sha):
             print(f"  withdrew our own now-stale APPROVE ({rid})")
@@ -2539,6 +2569,67 @@ def _version_phrase():
     """A trailing " at `abc1234`", or nothing at all — never a guess."""
     sha = reviewer_version()
     return f" at `{sha}`" if sha else ""
+
+
+#: A FINDING line — the only place a cited path may be read from.
+#:
+#: The caveat block renders bare `` `path` `` spans too (the "were NOT opened"
+#: list), and reading those as cited would make every truncated review's block
+#: undismissable — the blanket behaviour this replaced. Finding lines open with
+#: the severity icon; caveat lines open with `>`.
+#:
+#: BUILT FROM `ICON`, not typed out. The hand-written version listed 🔴 🟡 🔵
+#: and forgot ⚠️, which `normalize_severity` gives to any severity outside the
+#: vocabulary — so a block citing an unread file through an unknown-severity
+#: finding was invisible here and got dismissed. A fourth icon added later
+#: would have done it again; this cannot drift.
+_FINDING_LINE = re.compile(
+    r"(?m)^(?:" + "|".join(re.escape(i) for i in sorted(ICON.values())) + r") .*$")
+
+#: A path inside a code span, with or without a `:line` suffix. `_where_link`
+#: renders `path:line` when the finding carries a numeric line and a bare
+#: `path` when it does not — `validate_findings` does not require one — so a
+#: block mixing the two shapes must not look like it cited only the first.
+_CITED = re.compile(r"`([^`\n]+?)(?::\d+)?`")
+
+
+def _cited_tokens(body):
+    """Every backticked token a review body's FINDINGS point at, normalised.
+
+    NO GUESS ABOUT WHAT A PATH LOOKS LIKE. The first version kept only tokens
+    containing "/" or "." to filter out prose, and dropped `Makefile`,
+    `Dockerfile`, `LICENSE` — real paths `_where_link` renders bare — so a
+    block citing an unread `Makefile` was invisible and got dismissed. That was
+    the FOURTH shape of one false-clean on this change, after a missing
+    argument, a lineless finding and a fourth severity icon.
+
+    So the caller does not classify: it intersects these tokens with the paths
+    this run did not read, which is an exact question with an exact answer.
+    Prose can never match a real path, and a filename never has to look like
+    one.
+    """
+    return {os.path.normpath(m.group(1))
+            for line in _FINDING_LINE.findall(body or "")
+            for m in _CITED.finditer(line)}
+
+
+def _cited_files(body, pr_files=()):
+    """Which of a block's cited tokens are FILES OF THIS PULL REQUEST.
+
+    THE LAST GUESS, REMOVED. Asking "does this look like a path" kept a shape
+    test alive for the "did this block name a file at all" question — and it
+    failed the mirror way: a block citing only `Makefile` named no file by that
+    test, so under truncation it could never clear, which is the very trap
+    SCRUM-1293 exists to end. A token is a file when it IS one of the files
+    this pull request touches. Prose never is; `Makefile` always is.
+
+    Falls back to the shape test only when the caller cannot say what the PR
+    touches, where being wrong means refusing to dismiss.
+    """
+    tokens = _cited_tokens(body)
+    known = {os.path.normpath(f) for f in (pr_files or []) if f}
+    return (tokens & known) if known else {p for p in tokens
+                                           if "/" in p or "." in p}
 
 
 #: A markdown link or image, and a bare autolink. `detail` and `title` are
@@ -3182,8 +3273,15 @@ def main():
                                           getattr(diff, "oversized", ()))
             print(f"nothing reviewed: {len(excluded)} file(s) over "
                   f"{MAX_FILE_DIFF:,} chars")
+            # `unread` IS EVERY FILE HERE. This run read nothing at all, so
+            # a block about any of them is one it cannot speak for — and
+            # without this the dismissal saw an EMPTY unread set and cleared
+            # exactly those blocks, which is the false-clean the guard exists
+            # to prevent. Found by this reviewer on the PR that narrowed the
+            # guard: the main path was threaded and this early return was not.
             event = post_review(repo, pr, "COMMENT", note,
-                                head_sha=meta["head"]["sha"], truncated=True)
+                                head_sha=meta["head"]["sha"], truncated=True,
+                                unread=list(excluded), pr_files=list(excluded))
             status.done(repo, meta["head"]["sha"], event,
                         f"{len(excluded)} file(s) too large to review")
             return
@@ -3375,7 +3473,14 @@ def main():
     # left the run page reporting a clean approval GitHub had declined — the
     # very claim the fallback exists to retract.
     posted = post_review(repo, pr, event, body,
-                         head_sha=head_sha, truncated=truncated)
+                         head_sha=head_sha, truncated=truncated,
+                         # What THIS run did not read, so a block about a file
+                         # it did read can still clear.
+                         unread=unopened,
+                         # What the PR touches, so a cited token is a FILE by
+                         # membership rather than by looking like one.
+                         pr_files=list(_diff_paths_with_deletions(whole))
+                         + list(pr_paths))
     _write_step_summary(repo, pr, posted,
                         _verdict_withheld(body, event)
                         if posted.startswith("COMMENT (") else body)
