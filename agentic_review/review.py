@@ -2387,8 +2387,11 @@ def _dismiss_stale_block(repo, pr, event, head_sha, truncated, unread=()):
         # THE FILES THAT BLOCK NAMED. Every finding renders `path:line`, so a
         # block that points somewhere this run did not read is exactly the one
         # a clean result cannot speak for.
-        cited = _cited_files(r.get("body") or "")
-        blind = sorted(cited & unread_paths)
+        body = r.get("body") or ""
+        cited = _cited_files(body)
+        # EXACT MATCH, not a shape test: a token this run did not read is
+        # blind whether or not it looks like a path to a regex.
+        blind = sorted(_cited_tokens(body) & unread_paths)
         if blind or (truncated and not cited):
             # No parseable file means no way to tell — and an unparseable body
             # under truncation is the case the old blanket rule was right about.
@@ -2589,16 +2592,34 @@ _FINDING_LINE = re.compile(
 _CITED = re.compile(r"`([^`\n]+?)(?::\d+)?`")
 
 
+def _cited_tokens(body):
+    """Every backticked token a review body's FINDINGS point at, normalised.
+
+    NO GUESS ABOUT WHAT A PATH LOOKS LIKE. The first version kept only tokens
+    containing "/" or "." to filter out prose, and dropped `Makefile`,
+    `Dockerfile`, `LICENSE` — real paths `_where_link` renders bare — so a
+    block citing an unread `Makefile` was invisible and got dismissed. That was
+    the FOURTH shape of one false-clean on this change, after a missing
+    argument, a lineless finding and a fourth severity icon.
+
+    So the caller does not classify: it intersects these tokens with the paths
+    this run did not read, which is an exact question with an exact answer.
+    Prose can never match a real path, and a filename never has to look like
+    one.
+    """
+    return {os.path.normpath(m.group(1))
+            for line in _FINDING_LINE.findall(body or "")
+            for m in _CITED.finditer(line)}
+
+
 def _cited_files(body):
-    """Every file a review body's FINDINGS point at, normalised."""
-    out = set()
-    for line in _FINDING_LINE.findall(body or ""):
-        for m in _CITED.finditer(line):
-            path = m.group(1)
-            # A path, not prose in backticks: it has a separator or a suffix.
-            if "/" in path or "." in path:
-                out.add(os.path.normpath(path))
-    return out
+    """The subset that is unmistakably a path — a separator or a suffix.
+
+    Used ONLY to ask "did this block name a file at all", where being wrong
+    means REFUSING to dismiss. `_cited_tokens` is what decides whether a
+    specific unread file was cited.
+    """
+    return {p for p in _cited_tokens(body) if "/" in p or "." in p}
 
 
 #: A markdown link or image, and a bare autolink. `detail` and `title` are

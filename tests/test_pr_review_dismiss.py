@@ -704,3 +704,33 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.setattr(prr, "_me", lambda: "review-bot")
         assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
                                         unread=["data/huge.jsonl"]) == []
+
+    def test_a_single_word_filename_keeps_the_block(self, monkeypatch, pr_review):
+        """`Makefile`, `Dockerfile`, `LICENSE` have no separator and no suffix,
+        and `_where_link` renders them bare. The shape test dropped them, so a
+        block citing an unread Makefile was invisible and got dismissed — the
+        FOURTH shape of one false-clean on this change. The decision is an exact
+        set intersection now, so no filename has to look like one."""
+        prr = pr_review
+        body = ("🔴 **read one** — [`src/app.py:12`](http://x)\n"
+                "🟡 **the build** — `Makefile`\n")
+        monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
+            [{"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
+              "user": {"login": "review-bot"}, "body": body}]))
+        monkeypatch.setattr(prr, "_me", lambda: "review-bot")
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=["Makefile"]) == []
+
+    def test_prose_cannot_match_a_path_that_was_not_read(self, monkeypatch, pr_review):
+        """The other half: dropping the shape test must not make every
+        backticked word block a dismissal. `normalize` is not a file, so it
+        cannot be in the unread set."""
+        prr = pr_review
+        body = ("🔴 **read one** — [`src/app.py:12`](http://x)\n"
+                "🔵 **prose** — the `normalize` helper is fine\n")
+        monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
+            [{"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
+              "user": {"login": "review-bot"}, "body": body}]))
+        monkeypatch.setattr(prr, "_me", lambda: "review-bot")
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=["data/huge.jsonl"]) == [1]
