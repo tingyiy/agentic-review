@@ -234,3 +234,63 @@ class TestFormatsThatNameTheirRegistryDifferently:
     def test_rubygems_itself_is_fine(self):
         gems = '@@ -1,3 +1,4 @@\n+  remote: https://rubygems.org/\n'
         assert checks.foreign_registries({"Gemfile.lock": gems}) == []
+
+
+class TestTheOtherTwoExits:
+    """Both found by the reviewer on this PR: a second posting path that never
+    passed the DRY guard, and a fingerprint that could not see the file the
+    whole feature is about."""
+
+    def test_dry_prints_the_lockfile_review_instead_of_posting(self, monkeypatch):
+        """DRY's contract is that it prints what it WOULD do. The lockfile-only
+        path posted anyway — a second exit reaching GitHub without passing the
+        one guard."""
+        import json
+        seen = {}
+        d = pr._Diff("")
+        d.full = ""
+        d.lockfiles = {"package-lock.json": NPM}
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: (d, [], pr._Skipped(["package-lock.json"])))
+        monkeypatch.setattr(pr, "_already_reviewed", lambda *a, **k: "")
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr, "post_review",
+                            lambda *a, **k: seen.setdefault("posted", True) or "COMMENT")
+        monkeypatch.setattr(pr.status, "done", lambda *a: None)
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "a" * 40}}))
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.setenv("DRY", "1")
+        pr.main()
+        assert "posted" not in seen, "DRY reached GitHub"
+
+    def test_a_lockfile_change_moves_the_fingerprint(self):
+        """`full` deliberately excludes the lockfile — 40,000 lines of JSON in
+        the cross-reference names would drown them — but the mark in the body
+        decides "has anything changed since the last review", and a
+        lockfile-only push on top of an already-reviewed change IS a change."""
+        source = "--- a/x\n+++ b/x\n@@\n+x\n"
+        assert pr._diff_fp(source + NPM) != pr._diff_fp(source)
+
+    def test_main_fingerprints_the_lockfile_too(self, monkeypatch):
+        """The wiring, not the helper: `_already_reviewed` has to RECEIVE a
+        diff that carries the lockfile, or a lockfile-only push on top of an
+        already-reviewed change is skipped and its findings thrown away."""
+        import json
+        seen = {}
+        d = pr._Diff("--- a/x\n+++ b/x\n@@\n+x\n")
+        d.full = "--- a/x\n+++ b/x\n@@\n+x\n"
+        d.lockfiles = {"package-lock.json": NPM}
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: (d, [], pr._Skipped(["package-lock.json"])))
+        monkeypatch.setattr(pr, "_already_reviewed",
+                            lambda *a, **k: seen.setdefault("diff", a[3]) and "stop")
+        monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "a" * 40}}))
+        monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
+        monkeypatch.delenv("DRY", raising=False)
+        pr.main()
+        assert "evil.example.com" in seen["diff"], "the lockfile is not fingerprinted"

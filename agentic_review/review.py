@@ -3356,6 +3356,15 @@ def main():
     # EVERY FILE for the questions about the pull request itself — which paths
     # it touches, and the fingerprint that decides whether anything changed.
     whole = getattr(diff, "full", "") or diff
+    # THE FINGERPRINT COVERS THE LOCKFILE; THE CONTEXT DOES NOT. `whole` feeds
+    # `_diff_paths` and the cross-reference names, and 40,000 lines of JSON
+    # there would drown both — but the mark in the review body is what decides
+    # "has anything changed since the last review", and a lockfile-only push on
+    # top of an already-reviewed change is a change. Hashing only `whole` meant
+    # that push was skipped and its lockfile findings thrown away
+    # (SCRUM-1269, found by this reviewer).
+    fingerprinted = whole + "".join(
+        (getattr(diff, "lockfiles", None) or {}).values())
     truncated = bool(excluded)
     # BEFORE THE EARLY RETURN, because the motivating case IS an empty diff.
     # caeli-marketing#243 changed an image and a `package-lock.json`: every
@@ -3392,7 +3401,14 @@ def main():
             print(f"nothing reviewable, but {len(lock_findings)} lockfile "
                   f"finding(s)", flush=True)
             body = render(lock_findings, False, skipped,
-                          head_sha=meta["head"]["sha"], repo=repo, diff=whole)
+                          head_sha=meta["head"]["sha"], repo=repo,
+                          diff=fingerprinted)
+            if os.environ.get("DRY"):
+                # DRY's whole contract is that it prints what it WOULD do.
+                # This path posted anyway — a second exit that reached GitHub
+                # without passing the one guard (found by this reviewer).
+                print(f"--- would post {review_event(lock_findings)} ---\n{body}")
+                return
             event = post_review(repo, pr, review_event(lock_findings), body,
                                 head_sha=meta["head"]["sha"])
             status.done(repo, meta["head"]["sha"], event,
@@ -3416,7 +3432,7 @@ def main():
     # ONE fetch, two readers: the nothing-new guard and the since-list ask the
     # same endpoint the same question minutes apart.
     revs = _reviews(repo, pr)
-    nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], whole,
+    nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], fingerprinted,
                                     title=meta.get("title") or "",
                                     commits=commit_messages(repo, pr),
                                     body=meta.get("body") or "", revs=revs)
@@ -3555,7 +3571,7 @@ def main():
     # review. Found by this reviewer on its own PR.
     body, event = _finalize_review(findings, withdrawn, truncated, skipped,
                                    head_sha=head_sha, repo=repo,
-                                   wire_fields=wire_fields, diff=whole,
+                                   wire_fields=wire_fields, diff=fingerprinted,
                                    excluded=unopened,
                                    saw_every_change=saw_every_change,
                                    # `whole` is a plain string by the time it
