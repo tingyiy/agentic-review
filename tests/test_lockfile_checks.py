@@ -110,16 +110,16 @@ class TestItReachesTheReview:
                              lockfiles={"package-lock.json": NPM})
         assert any("not the usual registry" in f["title"] for f in out)
 
-    def test_main_hands_the_lockfiles_to_the_checks(self, monkeypatch):
-        """The seam, not the helper. `run_all` reading a lockfile is useless if
-        `main` never passes one — and the last two tickets each spent a review
-        round on exactly this kind of untested forwarding."""
+    def _drive(self, monkeypatch, diff_text, lockfiles, excluded=()):
+        """`main` with the model stubbed out, returning what got POSTED."""
         import json
         seen = {}
-        d = pr._Diff("--- a/x\n+++ b/x\n@@\n+x\n")
-        d.full = str(d)
-        d.lockfiles = {"package-lock.json": NPM}
-        monkeypatch.setattr(pr, "pr_diff", lambda *a: (d, [], pr._Skipped([])))
+        d = pr._Diff(diff_text)
+        d.full = diff_text
+        d.lockfiles = lockfiles
+        monkeypatch.setattr(pr, "pr_diff",
+                            lambda *a: (d, list(excluded), pr._Skipped(
+                                list(lockfiles))))
         monkeypatch.setattr(pr, "_already_reviewed", lambda *a, **k: "")
         monkeypatch.setattr(pr, "checkout", lambda *a: None)
         monkeypatch.setattr(pr, "build_context", lambda *a: "")
@@ -127,12 +127,15 @@ class TestItReachesTheReview:
         monkeypatch.setattr(pr, "changed_since_last_review", lambda *a, **k: "")
         monkeypatch.setattr(pr, "commit_messages", lambda *a: [])
         monkeypatch.setattr(pr.ctx, "expand_hunks", lambda d_, w, **k: d_)
+        monkeypatch.setattr(pr.ctx, "skeletons", lambda *a: "")
         monkeypatch.setattr(pr, "review_findings", lambda *a, **k: [])
         monkeypatch.setattr(pr, "_revise", lambda f, w, r: (f, []))
-        monkeypatch.setattr(pr.checks, "run_all",
-                            lambda *a, **k: seen.setdefault(
-                                "lockfiles", k.get("lockfiles")) and [])
-        monkeypatch.setattr(pr, "post_review", lambda *a, **k: "COMMENT")
+        monkeypatch.setattr(pr, "post_review",
+                            lambda repo, n, ev, body, **k: (
+                                seen.update(event=ev, body=body), ev)[1])
+        monkeypatch.setattr(pr.status, "done", lambda *a: None)
+        monkeypatch.setattr(pr.status, "nothing_to_review",
+                            lambda repo, sha, why: seen.setdefault("quiet", why))
         monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
         monkeypatch.setattr(pr, "gh", lambda *a, **k: json.dumps(
             {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
@@ -140,7 +143,53 @@ class TestItReachesTheReview:
         monkeypatch.setattr(pr.sys, "argv", ["pr-review", "app", "7"])
         monkeypatch.delenv("DRY", raising=False)
         pr.main()
-        assert seen["lockfiles"] == {"package-lock.json": NPM}
+        return seen
+
+    def test_a_lockfile_only_pr_is_still_reviewed(self, monkeypatch):
+        """THE MOTIVATING CASE. caeli-marketing#243 changed an image and a
+        `package-lock.json`: every file skipped, so `diff` is empty and the
+        early return fires — before the checks. The feature would never have
+        run on the pull request it was written for."""
+        seen = self._drive(monkeypatch, "", {"package-lock.json": NPM})
+        assert "quiet" not in seen, "took the nothing-to-review exit"
+        assert "not the usual registry" in seen["body"]
+
+    def test_a_clean_lockfile_only_pr_is_still_quiet(self, monkeypatch):
+        """The other half: an ordinary dependency bump says nothing, and a
+        comment on every dependabot PR is what gets a check muted."""
+        seen = self._drive(monkeypatch, "", {"package-lock.json": BUMP})
+        assert "quiet" in seen and "body" not in seen
+
+    def test_a_normal_pr_reports_them_once(self, monkeypatch):
+        """Computed before the early return AND passed to `run_all` would
+        double every lockfile finding on a PR that has other changes."""
+        seen = self._drive(monkeypatch, "--- a/x\n+++ b/x\n@@\n+x\n",
+                           {"package-lock.json": NPM})
+        assert seen["body"].count("not the usual registry") == 1
+
+
+class TestUrlIsNotAlwaysAnArtifact:
+    """npm's lockfile carries `"funding": {"url": "https://github.com/sponsors/…"}`
+    on ordinary packages, and `url` is one of the fields this check reads — so
+    every funded dependency flagged `github.com`. That false positive is what
+    gets a check muted before it catches anything."""
+
+    def test_a_funding_link_is_not_a_package_source(self):
+        funding = '@@ -1,3 +1,4 @@\n+      "url": "https://github.com/sponsors/foo"\n'
+        assert checks.foreign_registries({"package-lock.json": funding}) == []
+
+    def test_a_wheel_url_still_is(self):
+        """uv and poetry name the artifact with a bare `url`, and it IS a
+        package location — the value says which."""
+        wheel = ('@@ -1,3 +1,4 @@\n'
+                 '+url = "https://evil.example/foo-1.0-py3-none-any.whl"\n')
+        assert len(checks.foreign_registries({"uv.lock": wheel})) == 1
+
+    def test_resolved_and_remote_need_no_suffix(self):
+        """`resolved`, `source` and `remote` never name anything but a package
+        location, whatever the value looks like."""
+        gems = '@@ -1,3 +1,4 @@\n+  remote: https://gems.evil.example/\n'
+        assert len(checks.foreign_registries({"Gemfile.lock": gems})) == 1
 
 
 class TestEveryFormatIsBothSkippedAndChecked:
@@ -179,17 +228,8 @@ class TestFormatsThatNameTheirRegistryDifferently:
     def test_but_another_github_source_still_is(self):
         """The allowlist is the index URL, not the host: a git dependency on
         some other repository is exactly what this should surface."""
-        cargo = ('@@ -1,3 +1,4 @@\n'
-                 '+source = "git+https://github.com/someone/else"\n')
+        cargo = '@@ -1,3 +1,4 @@\n+source = "git+https://github.com/someone/else"\n'
         assert len(checks.foreign_registries({"Cargo.lock": cargo})) == 1
-
-    def test_gemfiles_remote_is_read(self):
-        """Gemfile.lock names its registry with `remote:`, which is none of
-        `resolved`/`url`/`source` — so a swapped host, the exact signal this
-        check exists for, was invisible in that format."""
-        gems = '@@ -1,3 +1,4 @@\n+  remote: https://gems.evil.example/\n'
-        out = checks.foreign_registries({"Gemfile.lock": gems})
-        assert len(out) == 1 and "gems.evil.example" in out[0]["detail"]
 
     def test_rubygems_itself_is_fine(self):
         gems = '@@ -1,3 +1,4 @@\n+  remote: https://rubygems.org/\n'

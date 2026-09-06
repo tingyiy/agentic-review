@@ -415,10 +415,20 @@ DEFAULT_SOURCE_URLS = (
 )
 
 #: A resolved artifact location in any of the lockfile formats.
+#: Fields that name WHERE A PACKAGE COMES FROM, unambiguously.
 _RESOLVED = re.compile(
-    r"""["']?(?:resolved|url|source|remote)["']?\s*[:=]\s*["']?
+    r"""["']?(?P<field>resolved|url|source|remote)["']?\s*[:=]\s*["']?
         (?:registry\+)?                       # Cargo prefixes its index
         (?P<url>(?:https?|git\+https?|git)://[^"'\s,]+)""", re.X)
+
+#: `url` IS NOT ALWAYS AN ARTIFACT. npm's lockfile carries
+#: `"funding": {"url": "https://github.com/sponsors/…"}`, which would flag
+#: `github.com` on ordinary packages — the false positive that gets a check
+#: muted before it catches anything. `resolved`, `source` and `remote` always
+#: name a package location; a bare `url` counts only when its VALUE is an
+#: artifact, which uv and poetry write as a file and npm's funding never is.
+_ARTIFACT_URL = re.compile(
+    r"\.(tgz|tar\.gz|tar\.bz2|zip|whl|crate|gem|jar|egg)$", re.I)
 
 #: An artifact fingerprint, whatever the format calls it.
 _INTEGRITY = re.compile(
@@ -467,6 +477,9 @@ def foreign_registries(lockfiles):
             url = m.group("url").rstrip("/").split("#", 1)[0]
             if url in DEFAULT_SOURCE_URLS:
                 continue
+            if (m.group("field").lower() == "url"
+                    and not _ARTIFACT_URL.search(url.split("?", 1)[0])):
+                continue                # a funding link, not a package
             host = _host(url)
             if host and not any(host == d or host.endswith("." + d)
                                 for d in DEFAULT_REGISTRIES):

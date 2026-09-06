@@ -3357,6 +3357,12 @@ def main():
     # it touches, and the fingerprint that decides whether anything changed.
     whole = getattr(diff, "full", "") or diff
     truncated = bool(excluded)
+    # BEFORE THE EARLY RETURN, because the motivating case IS an empty diff.
+    # caeli-marketing#243 changed an image and a `package-lock.json`: every
+    # file skipped, nothing reviewable, and the lockfile check added for
+    # exactly that pull request would never have run on it. Found by this
+    # reviewer on the PR that added it (SCRUM-1269).
+    lock_findings = checks.lockfile_changes(getattr(diff, "lockfiles", None))
     if not diff.strip():
         # "NOTHING TO REVIEW" AND "I DID NOT READ IT" ARE DIFFERENT SENTENCES,
         # and the size ceiling made the second one wear the first's clothes: a
@@ -3380,6 +3386,17 @@ def main():
                                 unread=list(excluded), pr_files=list(excluded))
             status.done(repo, meta["head"]["sha"], event,
                         f"{len(excluded)} file(s) too large to review")
+            return
+        if lock_findings:
+            # There IS something to say, and no model was needed to find it.
+            print(f"nothing reviewable, but {len(lock_findings)} lockfile "
+                  f"finding(s)", flush=True)
+            body = render(lock_findings, False, skipped,
+                          head_sha=meta["head"]["sha"], repo=repo, diff=whole)
+            event = post_review(repo, pr, review_event(lock_findings), body,
+                                head_sha=meta["head"]["sha"])
+            status.done(repo, meta["head"]["sha"], event,
+                        f"{len(lock_findings)} lockfile finding(s)")
             return
         why = (f"{skipped} generated/binary file(s), nothing else changed"
                if skipped else "no reviewable text in this change")
@@ -3497,7 +3514,10 @@ def main():
                                    pr_body=meta.get("body") or "", diff=whole,
                                    # Skipped for the model, read here: nobody
                                    # else looks at a lockfile at all.
-                                   lockfiles=getattr(diff, "lockfiles", None))
+                                   # Already computed before the early
+                                   # return; `run_all` re-deriving them would
+                                   # double every lockfile finding.
+                                   lockfiles=None) + lock_findings
 
     # UNREVIEWED MEANS UNOPENED. The agent can read anything in the checkout,
     # so a file the diff had no room for is not unreviewed if the agent went
