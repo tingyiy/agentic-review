@@ -125,6 +125,7 @@ def ticket_in_title(title):
         return []
     return [{
         "severity": "medium",
+        "kind": "deterministic",
         "file": "",
         "line": 0,
         "title": f"PR title does not name a ticket (expected e.g. {_example()})",
@@ -204,6 +205,7 @@ def agent_session_url(commits, pr_body=""):
         return []
     return [{
         "severity": "medium",
+        "kind": "deterministic",
         "file": "",
         "line": 0,
         "title": "agent-written commit with no session link",
@@ -358,6 +360,8 @@ def route_without_test(work, diff):
             continue
         out.append({
             "severity": "medium",
+            "kind": "deterministic",
+        "kind": "deterministic",
             "file": file_path,
             "line": 0,
             "title": f"new route {route} is not named by any test",
@@ -490,6 +494,8 @@ def foreign_registries(lockfiles):
         named = ", ".join(f"`{h}` ({n})" for h, n in sorted(hosts.items()))
         out.append({
             "severity": "medium",
+            "kind": "deterministic",
+        "kind": "deterministic",
             "file": path,
             "line": 0,
             "title": f"{path} resolves from a host that is not the usual registry",
@@ -528,6 +534,8 @@ def integrity_without_version(lockfiles):
         if suspect:
             out.append({
                 "severity": "medium",
+            "kind": "deterministic",
+        "kind": "deterministic",
                 "file": path,
                 "line": 0,
                 "title": (f"{path}: {suspect} artifact hash(es) changed with no "

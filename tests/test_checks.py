@@ -197,3 +197,40 @@ class TestRunAll:
     def test_a_clean_pr_produces_nothing(self, tmp_path):
         assert checks.run_all(str(tmp_path), ["src/app.py"],
                               title="SCRUM-1 fix it", commits=["fix it"]) == []
+
+
+class TestDeterministicFindingsSayWhatTheyAre:
+    """SCRUM-1241: the eval tally counted these beside model findings, so
+    "ours 4, Copilot 2" could be two model findings and two checks no other
+    reviewer could ever produce — flattering this tool on exactly the PRs
+    where it did the least model work.
+
+    Tagged where they are PRODUCED, not classified by title afterwards: a check
+    added later is counted correctly without anyone remembering a list."""
+
+    def test_every_check_tags_its_findings(self, tmp_path):
+        from agentic_review import checks
+        produced = (
+            checks.ticket_in_title("no ticket in this title")
+            + checks.agent_session_url(["a commit by Claude Code"], "")
+            + checks.foreign_registries(
+                {"Gemfile.lock": "@@\n+  remote: https://gems.evil.example/\n"})
+            + checks.integrity_without_version(
+                {"package-lock.json":
+                 '@@\n-  "integrity": "sha512-A"\n+  "integrity": "sha512-B"\n'})
+        )
+        assert produced, "no check produced a finding — the test proves nothing"
+        for f in produced:
+            assert f.get("kind") == "deterministic", f["title"]
+
+    def test_the_eval_split_reads_the_tag(self):
+        import sys, pathlib
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+        from eval.compare import _split
+        model, det = _split([
+            {"title": "a real defect", "severity": "high"},
+            {"title": "PR title does not name a ticket", "severity": "medium",
+             "kind": "deterministic"},
+        ])
+        assert len(model) == 1 and len(det) == 1
+        assert model[0]["title"] == "a real defect"
