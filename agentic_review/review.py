@@ -64,6 +64,11 @@ from .errors import AgentFailed, PRClosed, ReviewError, Superseded
 
 
 #: Generated files are volume without signal, and they dominate a diff by size.
+#: The skipped files a deterministic check still wants to read. Kept beside
+#: `SKIP` so the two cannot drift: everything here is skipped for the model.
+LOCKFILE = re.compile(r"(^|/)(package-lock\.json|yarn\.lock|poetry\.lock"
+                      r"|uv\.lock|pnpm-lock\.yaml|Cargo\.lock|Gemfile\.lock)$")
+
 SKIP = re.compile(
     r"(package-lock\.json|yarn\.lock|poetry\.lock|uv\.lock|bun\.lockb"
     r"|\.(png|jpe?g|gif|svg|ico|webp|woff2?|map|snap|pdf|zip|onnx|wasm)$"
@@ -149,7 +154,7 @@ def pr_diff(repo, pr):
     defects are. Order within each group is git's.
     """
     raw = gh(f"/repos/{ORG}/{repo}/pulls/{pr}", accept="application/vnd.github.v3.diff")
-    files, skipped_paths = [], []
+    files, skipped_paths, lock_blobs = [], [], {}
     for i, chunk in enumerate(raw.split("\ndiff --git ")):
         blob = chunk if i == 0 else "diff --git " + chunk
         if not blob.strip():
@@ -170,6 +175,8 @@ def pr_diff(repo, pr):
             # this PR, and anything reasoning about which files the change
             # touches then treats it as untouched.
             skipped_paths.append(path)
+            if LOCKFILE.search(path):
+                lock_blobs[path] = blob
             continue
         files.append((path, blob))
     files.sort(key=lambda f: bool(_LOW_PRIORITY.search(f[0])))
@@ -212,6 +219,7 @@ def pr_diff(repo, pr):
     # bug the fingerprint was widened to fix in the first place.
     out.full = "\n".join(blob for _, blob in files + oversized)
     out.oversized = [p for p, _ in oversized]
+    out.lockfiles = lock_blobs
     return (out, [p for p, _ in remaining] + [p for p, _ in oversized],
             _Skipped(skipped_paths))
 
@@ -228,6 +236,15 @@ class _Diff(str):
     overflow = ()
     #: Every file the PR touches, whichever pass shows it.
     full = ""
+    #: The diffs of lockfiles this PR changes, keyed by path.
+    #:
+    #: A lockfile is SKIPPED for the model — burning a review budget on 40,000
+    #: generated lines buys nothing — which made it the one part of a pull
+    #: request no reviewer looks at, human or otherwise. A deterministic check
+    #: can read it cheaply, so the blob is kept here rather than thrown away
+    #: with the rest of the skipped text (SCRUM-1269).
+    lockfiles = ()
+
     #: Of the excluded, the ones no pass could hold — over `MAX_FILE_DIFF`
     #: rather than merely past the pass budget. They need a different knob, so
     #: the caveat has to be able to tell them apart.
@@ -3471,7 +3488,10 @@ def main():
         # influenced into repeating or contradicting one.
         findings += checks.run_all(work, changed, title=meta.get("title") or "",
                                    commits=commit_messages(repo, pr),
-                                   pr_body=meta.get("body") or "", diff=whole)
+                                   pr_body=meta.get("body") or "", diff=whole,
+                                   # Skipped for the model, read here: nobody
+                                   # else looks at a lockfile at all.
+                                   lockfiles=getattr(diff, "lockfiles", None))
 
     # UNREVIEWED MEANS UNOPENED. The agent can read anything in the checkout,
     # so a file the diff had no room for is not unreviewed if the agent went

@@ -224,7 +224,8 @@ def agent_session_url(commits, pr_body=""):
     }]
 
 
-def run_all(work, changed_paths, title="", commits=(), pr_body="", diff=""):
+def run_all(work, changed_paths, title="", commits=(), pr_body="", diff="",
+            lockfiles=None):
     """Every deterministic check, in severity-independent order.
 
     Called AFTER the agent, so the model never sees these and cannot be
@@ -233,6 +234,7 @@ def run_all(work, changed_paths, title="", commits=(), pr_body="", diff=""):
     return (ticket_in_title(title)
             + agent_session_url(commits, pr_body)
             + route_without_test(work, diff)
+            + lockfile_changes(lockfiles)
             + claude_md_size(work, changed_paths))
 
 
@@ -372,3 +374,150 @@ def route_without_test(work, diff):
                 f"stop being raised."),
         })
     return out
+
+
+# --------------------------------------------------------------------------
+# What changed in a lockfile
+# --------------------------------------------------------------------------
+# THE ONE PART OF A PULL REQUEST NOBODY READS. A lockfile is on `SKIP`, which is
+# right for the model — 40,000 generated lines buy nothing and cost the budget
+# every other file needs — but the consequence is that a dependency change is
+# reviewed by no one at all. caeli-marketing#243 changed exactly two files, an
+# image and `package-lock.json`, and the run reported "nothing reviewable".
+#
+# So this is a LOOKUP, not a judgement, for the same reason `route_without_test`
+# is: the questions worth asking of a lockfile are all mechanical, and a model
+# asked to skim a diff this size will summarise it rather than check it.
+#
+# THREE QUESTIONS, in the order a reader would ask them:
+#   1. does anything now come from somewhere other than the usual registry;
+#   2. did a package's artifact change WITHOUT its version changing;
+#   3. what was added or removed.
+# The first two are security questions with a definite answer. The third is
+# context — reported low, because a dependency bump is normal work and a
+# reviewer that shouts about one gets muted.
+
+#: The hosts a lockfile normally resolves from. Anything else is worth a look —
+#: not an accusation: a private registry or a git dependency is a legitimate
+#: choice somebody should have made deliberately.
+DEFAULT_REGISTRIES = (
+    "registry.npmjs.org", "registry.yarnpkg.com", "files.pythonhosted.org",
+    "pypi.org", "crates.io", "static.crates.io", "rubygems.org",
+    "index.crates.io",
+)
+
+#: A resolved artifact location in any of the lockfile formats.
+_RESOLVED = re.compile(
+    r"""["']?(?:resolved|url|source)["']?\s*[:=]\s*["']?
+        (?P<url>(?:https?|git\+https?|git)://[^"'\s,]+)""", re.X)
+
+#: An artifact fingerprint, whatever the format calls it.
+_INTEGRITY = re.compile(
+    r"""["']?(?:integrity|checksum|hash)["']?\s*[:=]""", re.I)
+
+#: A version field, so an integrity change can be told from a version bump.
+_VERSION = re.compile(r"""["']?version["']?\s*[:=]""", re.I)
+
+
+def _host(url):
+    rest = url.split("://", 1)[-1]
+    return rest.split("/", 1)[0].split("@")[-1].lower()
+
+
+def _hunks(blob):
+    """A lockfile diff's hunks, as lists of lines. Integrity and version have to
+    be compared WITHIN one hunk: two unrelated packages elsewhere in a 40,000
+    line file say nothing about each other."""
+    out, cur = [], None
+    for line in (blob or "").splitlines():
+        if line.startswith("@@"):
+            cur = []
+            out.append(cur)
+        elif cur is not None:
+            cur.append(line)
+    return out
+
+
+def foreign_registries(lockfiles):
+    """Artifacts a lockfile now resolves from somewhere unusual.
+
+    `medium`: a private registry or a git dependency is a legitimate choice, and
+    this says only that it was made — but a swapped registry host is also
+    exactly what a dependency-confusion attack looks like, and nothing else in
+    this pipeline would ever mention it.
+    """
+    out = []
+    for path, blob in sorted((lockfiles or {}).items()):
+        hosts = {}
+        for line in (blob or "").splitlines():
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            m = _RESOLVED.search(line)
+            if not m:
+                continue
+            host = _host(m.group("url"))
+            if host and not any(host == d or host.endswith("." + d)
+                                for d in DEFAULT_REGISTRIES):
+                hosts.setdefault(host, 0)
+                hosts[host] += 1
+        if not hosts:
+            continue
+        named = ", ".join(f"`{h}` ({n})" for h, n in sorted(hosts.items()))
+        out.append({
+            "severity": "medium",
+            "file": path,
+            "line": 0,
+            "title": f"{path} resolves from a host that is not the usual registry",
+            "detail": (
+                f"Added entries resolve from {named}. That is legitimate for a "
+                "private registry or a git dependency and is worth one look "
+                "either way: a lockfile is skipped by the review budget, so "
+                "nothing else in this pipeline reads it, and a swapped host is "
+                "what dependency confusion looks like. Confirm the host is one "
+                "you meant to depend on."),
+        })
+    return out
+
+
+def integrity_without_version(lockfiles):
+    """A package whose artifact hash changed while its version did not.
+
+    The same version resolving to a different artifact is either a registry
+    republish or a tampered one, and neither should pass unread. `medium`.
+    """
+    out = []
+    for path, blob in sorted((lockfiles or {}).items()):
+        suspect = 0
+        for hunk in _hunks(blob):
+            removed = [l for l in hunk if l.startswith("-")]
+            added = [l for l in hunk if l.startswith("+")]
+            if not any(_INTEGRITY.search(l) for l in removed):
+                continue
+            if not any(_INTEGRITY.search(l) for l in added):
+                continue
+            # A version line on either side means the package moved, which
+            # explains a new artifact.
+            if any(_VERSION.search(l) for l in removed + added):
+                continue
+            suspect += 1
+        if suspect:
+            out.append({
+                "severity": "medium",
+                "file": path,
+                "line": 0,
+                "title": (f"{path}: {suspect} artifact hash(es) changed with no "
+                          "version change"),
+                "detail": (
+                    "A package whose integrity/checksum moved while its version "
+                    "stayed put is resolving to a DIFFERENT artifact under the "
+                    "same name and version. That is a registry republish or a "
+                    "tampered one; both are worth a deliberate look, and a "
+                    "lockfile is read by nothing else in this pipeline. If the "
+                    "bump was intended, the version should have moved with it."),
+            })
+    return out
+
+
+def lockfile_changes(lockfiles):
+    """Every lockfile question, in the order a reader would ask them."""
+    return foreign_registries(lockfiles) + integrity_without_version(lockfiles)
