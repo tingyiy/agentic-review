@@ -3219,8 +3219,15 @@ def main():
                                           getattr(diff, "oversized", ()))
             print(f"nothing reviewed: {len(excluded)} file(s) over "
                   f"{MAX_FILE_DIFF:,} chars")
+            # `unread` IS EVERY FILE HERE. This run read nothing at all, so
+            # a block about any of them is one it cannot speak for — and
+            # without this the dismissal saw an EMPTY unread set and cleared
+            # exactly those blocks, which is the false-clean the guard exists
+            # to prevent. Found by this reviewer on the PR that narrowed the
+            # guard: the main path was threaded and this early return was not.
             event = post_review(repo, pr, "COMMENT", note,
-                                head_sha=meta["head"]["sha"], truncated=True)
+                                head_sha=meta["head"]["sha"], truncated=True,
+                                unread=list(excluded))
             status.done(repo, meta["head"]["sha"], event,
                         f"{len(excluded)} file(s) too large to review")
             return

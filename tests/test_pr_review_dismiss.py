@@ -624,3 +624,28 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.delenv("DRY", raising=False)
         prr.main()
         assert seen["unread"] == ["data/huge.jsonl"]
+
+    def test_the_all_oversized_exit_hands_over_every_file(self, monkeypatch, pr_review):
+        """It read NOTHING, so it may not clear a block about any of it. That
+        path posted without `unread`, so the dismissal saw an empty set and
+        cleared precisely the blocks it could not speak for — a false-clean,
+        and worse than the blanket refusal it replaced."""
+        prr = pr_review
+        seen = {}
+        d = prr._Diff("")
+        d.oversized = ["data/huge.jsonl"]
+        monkeypatch.setattr(prr, "pr_diff",
+                            lambda *a: (d, ["data/huge.jsonl"], prr._Skipped([])))
+        monkeypatch.setattr(prr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(prr, "post_review",
+                            lambda repo, n, ev, body, head_sha="", truncated=False,
+                            unread=(): (seen.update(unread=list(unread),
+                                                    truncated=truncated), ev)[1])
+        monkeypatch.setattr(prr.status, "done", lambda *a: None)
+        monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "e" * 40}}))
+        monkeypatch.setattr(prr.sys, "argv", ["pr-review", "repo", "1"])
+        monkeypatch.delenv("DRY", raising=False)
+        prr.main()
+        assert seen["unread"] == ["data/huge.jsonl"] and seen["truncated"] is True
