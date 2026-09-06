@@ -159,7 +159,7 @@ class TestARefusedApprovalStillClearsOurOwnBlock:
         monkeypatch.setattr(pr, "_withdraw_stale_approval", lambda *a: [])
         monkeypatch.setattr(
             pr, "_dismiss_stale_block",
-            lambda repo, prn, event, head, trunc, unread=():
+            lambda repo, prn, event, head, trunc, unread=(), pr_files=():
             seen.update(event=event, unread=list(unread)) or [])
         _wire(monkeypatch, refusal)
         return seen

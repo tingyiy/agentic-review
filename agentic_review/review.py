@@ -2327,7 +2327,8 @@ def _withdraw_stale_approval(repo, pr, head_sha):
     return withdrawn
 
 
-def _dismiss_stale_block(repo, pr, event, head_sha, truncated, unread=()):
+def _dismiss_stale_block(repo, pr, event, head_sha, truncated, unread=(),
+                         pr_files=()):
     """Clear OUR OWN stale CHANGES_REQUESTED once the blocking finding is gone.
 
     A COMMENTED review does not clear a CHANGES_REQUESTED on GitHub — only an
@@ -2388,7 +2389,7 @@ def _dismiss_stale_block(repo, pr, event, head_sha, truncated, unread=()):
         # block that points somewhere this run did not read is exactly the one
         # a clean result cannot speak for.
         body = r.get("body") or ""
-        cited = _cited_files(body)
+        cited = _cited_files(body, pr_files)
         # EXACT MATCH, not a shape test: a token this run did not read is
         # blind whether or not it looks like a path to a regex.
         blind = sorted(_cited_tokens(body) & unread_paths)
@@ -2466,7 +2467,7 @@ def _write_step_summary(repo, pr, event, body):
 
 
 def post_review(repo, pr, event, body, head_sha="", truncated=False,
-                unread=()):
+                unread=(), pr_files=()):
     """POST the review; return the event actually posted.
 
     THE FALLBACK IS KEYED ON THE REASON, NOT ON THE STATUS. 422 is GitHub's
@@ -2490,7 +2491,7 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False,
         # AFTER the post, never before: dismissing first would leave a window
         # where the PR is unblocked with nothing said in its place.
         for rid in _dismiss_stale_block(repo, pr, event, head_sha, truncated,
-                                        unread=unread):
+                                        unread=unread, pr_files=pr_files):
             print(f"  dismissed our own stale CHANGES_REQUESTED ({rid})")
         # ONLY on COMMENT. A REQUEST_CHANGES already moves our state off
         # approved on GitHub's side, so the old approval is not misleading
@@ -2525,7 +2526,7 @@ def post_review(repo, pr, event, body, head_sha="", truncated=False,
         #
         # "COMMENT" IS THE HONEST EVENT HERE: it is what GitHub recorded.
         for rid in _dismiss_stale_block(repo, pr, "COMMENT", head_sha, truncated,
-                                        unread=unread):
+                                        unread=unread, pr_files=pr_files):
             print(f"  dismissed our own stale CHANGES_REQUESTED ({rid})")
         for rid in _withdraw_stale_approval(repo, pr, head_sha):
             print(f"  withdrew our own now-stale APPROVE ({rid})")
@@ -2612,14 +2613,23 @@ def _cited_tokens(body):
             for m in _CITED.finditer(line)}
 
 
-def _cited_files(body):
-    """The subset that is unmistakably a path — a separator or a suffix.
+def _cited_files(body, pr_files=()):
+    """Which of a block's cited tokens are FILES OF THIS PULL REQUEST.
 
-    Used ONLY to ask "did this block name a file at all", where being wrong
-    means REFUSING to dismiss. `_cited_tokens` is what decides whether a
-    specific unread file was cited.
+    THE LAST GUESS, REMOVED. Asking "does this look like a path" kept a shape
+    test alive for the "did this block name a file at all" question — and it
+    failed the mirror way: a block citing only `Makefile` named no file by that
+    test, so under truncation it could never clear, which is the very trap
+    SCRUM-1293 exists to end. A token is a file when it IS one of the files
+    this pull request touches. Prose never is; `Makefile` always is.
+
+    Falls back to the shape test only when the caller cannot say what the PR
+    touches, where being wrong means refusing to dismiss.
     """
-    return {p for p in _cited_tokens(body) if "/" in p or "." in p}
+    tokens = _cited_tokens(body)
+    known = {os.path.normpath(f) for f in (pr_files or []) if f}
+    return (tokens & known) if known else {p for p in tokens
+                                           if "/" in p or "." in p}
 
 
 #: A markdown link or image, and a bare autolink. `detail` and `title` are
@@ -3271,7 +3281,7 @@ def main():
             # guard: the main path was threaded and this early return was not.
             event = post_review(repo, pr, "COMMENT", note,
                                 head_sha=meta["head"]["sha"], truncated=True,
-                                unread=list(excluded))
+                                unread=list(excluded), pr_files=list(excluded))
             status.done(repo, meta["head"]["sha"], event,
                         f"{len(excluded)} file(s) too large to review")
             return
@@ -3466,7 +3476,11 @@ def main():
                          head_sha=head_sha, truncated=truncated,
                          # What THIS run did not read, so a block about a file
                          # it did read can still clear.
-                         unread=unopened)
+                         unread=unopened,
+                         # What the PR touches, so a cited token is a FILE by
+                         # membership rather than by looking like one.
+                         pr_files=list(_diff_paths_with_deletions(whole))
+                         + list(pr_paths))
     _write_step_summary(repo, pr, posted,
                         _verdict_withheld(body, event)
                         if posted.startswith("COMMENT (") else body)

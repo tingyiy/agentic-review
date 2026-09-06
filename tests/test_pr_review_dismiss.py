@@ -616,7 +616,7 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.setattr(prr, "_pr_is_gone", lambda *a: None)
         monkeypatch.setattr(prr, "post_review",
                             lambda repo, n, ev, body, head_sha="", truncated=False,
-                            unread=(): (seen.update(unread=list(unread)), ev)[1])
+                            unread=(), pr_files=(): (seen.update(unread=list(unread)), ev)[1])
         monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
             {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
              "user": {"login": "someone"}, "head": {"sha": "a" * 40}}))
@@ -639,7 +639,7 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.setattr(prr, "_pr_is_gone", lambda *a: None)
         monkeypatch.setattr(prr, "post_review",
                             lambda repo, n, ev, body, head_sha="", truncated=False,
-                            unread=(): (seen.update(unread=list(unread),
+                            unread=(), pr_files=(): (seen.update(unread=list(unread),
                                                     truncated=truncated), ev)[1])
         monkeypatch.setattr(prr.status, "done", lambda *a: None)
         monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
@@ -734,3 +734,34 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.setattr(prr, "_me", lambda: "review-bot")
         assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
                                         unread=["data/huge.jsonl"]) == [1]
+
+    def test_a_read_single_word_filename_lets_the_block_clear(
+            self, monkeypatch, pr_review):
+        """The MIRROR of the previous test, and the trap SCRUM-1293 exists to
+        end: a block citing only `Makefile` named no file by the shape test, so
+        under truncation it could never clear even once that file HAD been
+        read. Membership of the PR's own files answers it exactly."""
+        prr = pr_review
+        monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
+            [{"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
+              "user": {"login": "review-bot"},
+              "body": "🔴 **the build** — `Makefile`"}]))
+        monkeypatch.setattr(prr, "_me", lambda: "review-bot")
+        assert prr._dismiss_stale_block(
+            "app", 1, "COMMENT", "newsha", True,
+            unread=["data/huge.jsonl"], pr_files=["Makefile"]) == [1]
+
+    def test_prose_only_block_under_truncation_still_refuses(
+            self, monkeypatch, pr_review):
+        """A block naming nothing this PR touches cannot be checked, and an
+        unparseable body under truncation is what the blanket rule was right
+        about."""
+        prr = pr_review
+        monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
+            [{"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
+              "user": {"login": "review-bot"},
+              "body": "🔴 **vague** — the `normalize` helper"}]))
+        monkeypatch.setattr(prr, "_me", lambda: "review-bot")
+        assert prr._dismiss_stale_block(
+            "app", 1, "COMMENT", "newsha", True,
+            unread=["x.py"], pr_files=["Makefile", "src/app.py"]) == []
