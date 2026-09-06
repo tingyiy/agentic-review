@@ -574,11 +574,26 @@ def conversation(repo, pr):
     # THE INSTRUCTION SOFTENS WHEN THE HISTORY IS INCOMPLETE. "Do not repeat
     # yourself" over a conversation missing its newest items is an instruction
     # to be wrong in the direction of silence.
-    if cut_short or dropped:
-        return ("\nSAID ON THIS PR SO FAR — this history is INCOMPLETE (its newest\n"
-                "items did not fit), so treat it as context rather than as a full\n"
-                "record: do not overrule the author, and where something here\n"
-                "answers a point, it is answered. Commit messages count.\n\n"
+    #
+    # WHICH END WENT MISSING IS THE WHOLE POINT, and the first version said
+    # "its newest items did not fit" for both cases. They are opposite: the
+    # budget above fills NEWEST-FIRST, so `dropped` means the OLDEST were cut
+    # and the newest are present — telling the model otherwise invites it to
+    # hedge about a rebuttal sitting in front of it. `cut_short` is the one
+    # where the newest are gone. Found by the reviewer on this PR; the log line
+    # already said "older item(s) dropped" and the prompt contradicted it.
+    if cut_short:
+        return ("\nSAID ON THIS PR SO FAR — this history is INCOMPLETE and it is the\n"
+                "NEWEST items that did not fit, so treat it as context rather than\n"
+                "as a full record: do not overrule the author, and where something\n"
+                "here answers a point, it is answered. Commit messages count.\n\n"
+                + "\n\n".join(out) + "\n")
+    if dropped:
+        return ("\nALREADY SAID ON THIS PR — the NEWEST exchanges, with the oldest\n"
+                "dropped for length. Do not repeat yourself, and do not overrule the\n"
+                "author. A reasoned rejection is a DECISION, not an open defect. If\n"
+                "you still disagree, say so ONCE, acknowledge their reason, and say\n"
+                "what it does not cover. Commit messages count.\n\n"
                 + "\n\n".join(out) + "\n")
     return ("\nALREADY SAID ON THIS PR — do not repeat yourself, and do not overrule\n"
             "the author. A reasoned rejection is a DECISION, not an open defect. If\n"

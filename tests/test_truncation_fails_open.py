@@ -126,3 +126,31 @@ class TestAnEmptyTruncatedHistoryStillSaysSo:
     def test_a_genuinely_empty_thread_still_says_nothing(self, monkeypatch):
         monkeypatch.setattr(pr, "_paged", lambda path, **kw: _paged_result([], False))
         assert pr.conversation("r", 1) == ""
+
+
+class TestWhichEndWentMissing:
+    """The budget fills NEWEST-first, so a dropped item is an OLD one — the
+    opposite of a truncated page walk, where the newest are gone. One message
+    for both told the model its newest exchange was missing when it was present,
+    inviting it to hedge about a rebuttal in front of it."""
+
+    def _items(self, n, body="a point"):
+        return [{"user": {"login": "octocat"}, "body": f"{body} {i}",
+                 "created_at": f"2026-01-{i + 1:02d}T00:00:00Z"} for i in range(n)]
+
+    def test_a_budget_drop_says_the_OLDEST_went(self, monkeypatch):
+        monkeypatch.setattr(pr, "CONVERSATION_BUDGET", 40)
+        monkeypatch.setattr(pr, "_paged", lambda path, **kw: _paged_result(
+            self._items(6) if "issues" in path else [], False))
+        out = pr.conversation("r", 1)
+        assert "oldest\ndropped for length" in out
+        assert "NEWEST items that did not fit" not in out
+        # And it keeps the full instruction: the newest exchange IS present.
+        assert "Do not repeat yourself" in out
+
+    def test_a_truncated_walk_still_says_the_NEWEST_went(self, monkeypatch):
+        monkeypatch.setattr(pr, "_paged", lambda path, **kw: _paged_result(
+            self._items(2) if "issues" in path else [], True))
+        out = pr.conversation("r", 1)
+        assert "NEWEST items that did not fit" in out
+        assert "Do not repeat yourself" not in out
