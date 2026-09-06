@@ -64,13 +64,19 @@ from .errors import AgentFailed, PRClosed, ReviewError, Superseded
 
 
 #: Generated files are volume without signal, and they dominate a diff by size.
-#: The skipped files a deterministic check still wants to read. Kept beside
-#: `SKIP` so the two cannot drift: everything here is skipped for the model.
-LOCKFILE = re.compile(r"(^|/)(package-lock\.json|yarn\.lock|poetry\.lock"
-                      r"|uv\.lock|pnpm-lock\.yaml|Cargo\.lock|Gemfile\.lock)$")
+#: Lockfile names, written ONCE. `SKIP` is built from this and `LOCKFILE`
+#: matches it, so a format cannot be checkable without being skipped or the
+#: reverse — which is what a comment claiming "these cannot drift" beside two
+#: hand-written lists bought: three of seven formats were in neither (found by
+#: this reviewer on the PR that added them).
+_LOCK_NAMES = (r"package-lock\.json|yarn\.lock|poetry\.lock|uv\.lock"
+               r"|bun\.lockb|pnpm-lock\.yaml|Cargo\.lock|Gemfile\.lock")
+
+#: The skipped files a deterministic check still wants to read.
+LOCKFILE = re.compile(r"(^|/)(" + _LOCK_NAMES + r")$")
 
 SKIP = re.compile(
-    r"(package-lock\.json|yarn\.lock|poetry\.lock|uv\.lock|bun\.lockb"
+    r"(" + _LOCK_NAMES +
     r"|\.(png|jpe?g|gif|svg|ico|webp|woff2?|map|snap|pdf|zip|onnx|wasm)$"
     r"|/dist/|/\.output/|/node_modules/)")
 

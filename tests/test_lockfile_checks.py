@@ -141,3 +141,56 @@ class TestItReachesTheReview:
         monkeypatch.delenv("DRY", raising=False)
         pr.main()
         assert seen["lockfiles"] == {"package-lock.json": NPM}
+
+
+class TestEveryFormatIsBothSkippedAndChecked:
+    """`LOCKFILE` listed seven formats and `SKIP` five, under a comment saying
+    the two "cannot drift" — so `pnpm-lock.yaml`, `Cargo.lock` and
+    `Gemfile.lock` were shown to the model (burning the budget SKIP exists to
+    protect) AND never captured for the checks. Two hand-written lists are what
+    drift; `SKIP` is built from the same names now."""
+
+    NAMES = ("package-lock.json", "yarn.lock", "poetry.lock", "uv.lock",
+             "bun.lockb", "pnpm-lock.yaml", "Cargo.lock", "Gemfile.lock")
+
+    def test_a_checkable_lockfile_is_always_a_skipped_one(self):
+        for name in self.NAMES:
+            assert pr.SKIP.search(f"diff --git a/{name} b/{name}"), name
+
+    def test_and_a_skipped_lockfile_is_always_checkable(self):
+        for name in self.NAMES:
+            assert pr.LOCKFILE.search(name), name
+
+    def test_a_nested_path_counts_too(self):
+        assert pr.LOCKFILE.search("services/api/Cargo.lock")
+        assert not pr.LOCKFILE.search("Cargo.lock.bak")
+
+
+class TestFormatsThatNameTheirRegistryDifferently:
+    def test_cargos_index_is_not_a_foreign_host(self):
+        """Cargo names crates.io as
+        `registry+https://github.com/rust-lang/crates.io-index`, so a host check
+        alone flags `github.com` on every Rust dependency — noise that would get
+        this muted before it caught anything."""
+        cargo = ('@@ -1,3 +1,4 @@\n'
+                 '+source = "registry+https://github.com/rust-lang/crates.io-index"\n')
+        assert checks.foreign_registries({"Cargo.lock": cargo}) == []
+
+    def test_but_another_github_source_still_is(self):
+        """The allowlist is the index URL, not the host: a git dependency on
+        some other repository is exactly what this should surface."""
+        cargo = ('@@ -1,3 +1,4 @@\n'
+                 '+source = "git+https://github.com/someone/else"\n')
+        assert len(checks.foreign_registries({"Cargo.lock": cargo})) == 1
+
+    def test_gemfiles_remote_is_read(self):
+        """Gemfile.lock names its registry with `remote:`, which is none of
+        `resolved`/`url`/`source` — so a swapped host, the exact signal this
+        check exists for, was invisible in that format."""
+        gems = '@@ -1,3 +1,4 @@\n+  remote: https://gems.evil.example/\n'
+        out = checks.foreign_registries({"Gemfile.lock": gems})
+        assert len(out) == 1 and "gems.evil.example" in out[0]["detail"]
+
+    def test_rubygems_itself_is_fine(self):
+        gems = '@@ -1,3 +1,4 @@\n+  remote: https://rubygems.org/\n'
+        assert checks.foreign_registries({"Gemfile.lock": gems}) == []

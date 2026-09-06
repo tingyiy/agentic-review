@@ -406,9 +406,18 @@ DEFAULT_REGISTRIES = (
     "index.crates.io",
 )
 
+#: Registry locations whose HOST is not the registry's own. Cargo names
+#: crates.io as `registry+https://github.com/rust-lang/crates.io-index`, so a
+#: host check alone flags `github.com` on every Rust dependency in the file —
+#: noise that would get this muted before it ever caught anything.
+DEFAULT_SOURCE_URLS = (
+    "https://github.com/rust-lang/crates.io-index",
+)
+
 #: A resolved artifact location in any of the lockfile formats.
 _RESOLVED = re.compile(
-    r"""["']?(?:resolved|url|source)["']?\s*[:=]\s*["']?
+    r"""["']?(?:resolved|url|source|remote)["']?\s*[:=]\s*["']?
+        (?:registry\+)?                       # Cargo prefixes its index
         (?P<url>(?:https?|git\+https?|git)://[^"'\s,]+)""", re.X)
 
 #: An artifact fingerprint, whatever the format calls it.
@@ -455,7 +464,10 @@ def foreign_registries(lockfiles):
             m = _RESOLVED.search(line)
             if not m:
                 continue
-            host = _host(m.group("url"))
+            url = m.group("url").rstrip("/").split("#", 1)[0]
+            if url in DEFAULT_SOURCE_URLS:
+                continue
+            host = _host(url)
             if host and not any(host == d or host.endswith("." + d)
                                 for d in DEFAULT_REGISTRIES):
                 hosts.setdefault(host, 0)
