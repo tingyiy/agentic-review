@@ -2567,15 +2567,31 @@ def _version_phrase():
     return f" at `{sha}`" if sha else ""
 
 
-#: The `path:line` a finding renders, inside a link or as a bare code span.
-#: Used to ask which files a past review's findings were ABOUT.
-_CITED = re.compile(r"`([^`\n]+?):(?:\d+)`")
+#: A FINDING line — the only place a cited path may be read from.
+#:
+#: The caveat block renders bare `` `path` `` spans too (the "were NOT opened"
+#: list), and reading those as cited would make every truncated review's block
+#: undismissable — the blanket behaviour this replaced. Finding lines open with
+#: the severity icon; caveat lines open with `>`.
+_FINDING_LINE = re.compile(r"(?m)^(?:🔴|🟡|🔵) .*$")
+
+#: A path inside a code span, with or without a `:line` suffix. `_where_link`
+#: renders `path:line` when the finding carries a numeric line and a bare
+#: `path` when it does not — `validate_findings` does not require one — so a
+#: block mixing the two shapes must not look like it cited only the first.
+_CITED = re.compile(r"`([^`\n]+?)(?::\d+)?`")
 
 
 def _cited_files(body):
-    """Every file a review body's findings point at, normalised."""
-    return {os.path.normpath(m.group(1)) for m in _CITED.finditer(body or "")
-            if "/" in m.group(1) or "." in m.group(1)}
+    """Every file a review body's FINDINGS point at, normalised."""
+    out = set()
+    for line in _FINDING_LINE.findall(body or ""):
+        for m in _CITED.finditer(line):
+            path = m.group(1)
+            # A path, not prose in backticks: it has a separator or a suffix.
+            if "/" in path or "." in path:
+                out.add(os.path.normpath(path))
+    return out
 
 
 #: A markdown link or image, and a bare autolink. `detail` and `title` are

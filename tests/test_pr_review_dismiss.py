@@ -649,3 +649,36 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.delenv("DRY", raising=False)
         prr.main()
         assert seen["unread"] == ["data/huge.jsonl"] and seen["truncated"] is True
+
+    MIXED = ("🔴 **read one** — [`src/app.py:12`](http://x)\n"
+             "🟡 **no line** — `data/huge.jsonl`\n"
+             "> **⚠️ Partial review — 1 changed file(s) were NOT opened**: "
+             "`vendor/other.py`.\n"
+             "🔵 **prose** — the `normalize` helper is fine\n")
+
+    def test_a_finding_with_no_line_still_names_its_file(self, pr_review):
+        """`_where_link` renders `path:line` when the finding carries a line and
+        a bare `path` when it does not — `validate_findings` never required one.
+        A block mixing the shapes must not look like it cited only the first."""
+        assert pr_review._cited_files(self.MIXED) == {"src/app.py", "data/huge.jsonl"}
+
+    def test_the_caveats_own_file_list_is_not_a_citation(self, pr_review):
+        """The "were NOT opened" block renders bare `path` spans too. Reading
+        those as cited would make EVERY truncated review's block undismissable —
+        the blanket behaviour this replaced."""
+        assert "vendor/other.py" not in pr_review._cited_files(self.MIXED)
+
+    def test_prose_in_backticks_is_not_a_path(self, pr_review):
+        assert "normalize" not in pr_review._cited_files(self.MIXED)
+
+    def test_a_lineless_finding_about_an_unread_file_keeps_the_block(
+            self, monkeypatch, pr_review):
+        """The whole point: finding A was read, finding B was not, and the
+        block stands because of B."""
+        prr = pr_review
+        monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
+            [{"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
+              "user": {"login": "review-bot"}, "body": self.MIXED}]))
+        monkeypatch.setattr(prr, "_me", lambda: "review-bot")
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=["data/huge.jsonl"]) == []
