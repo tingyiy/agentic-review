@@ -208,20 +208,42 @@ class TestDeterministicFindingsSayWhatTheyAre:
     Tagged where they are PRODUCED, not classified by title afterwards: a check
     added later is counted correctly without anyone remembering a list."""
 
-    def test_every_check_tags_its_findings(self, tmp_path):
+    def test_run_all_tags_everything_it_returns(self, tmp_path):
+        """Through the DOOR, not check by check. Tagging each dict missed two
+        of the five checks and double-tagged three, and the first version of
+        this test exercised neither of the two it missed — so it passed. Drive
+        the exit and nothing can be forgotten."""
         from agentic_review import checks
-        produced = (
-            checks.ticket_in_title("no ticket in this title")
-            + checks.agent_session_url(["a commit by Claude Code"], "")
-            + checks.foreign_registries(
-                {"Gemfile.lock": "@@\n+  remote: https://gems.evil.example/\n"})
-            + checks.integrity_without_version(
-                {"package-lock.json":
-                 '@@\n-  "integrity": "sha512-A"\n+  "integrity": "sha512-B"\n'})
-        )
-        assert produced, "no check produced a finding — the test proves nothing"
+        (tmp_path / "CLAUDE.md").write_text("x\n" * 5000)
+        produced = checks.run_all(
+            str(tmp_path), ["CLAUDE.md"],
+            title="no ticket in this title",
+            commits=["a commit by Claude Code"],
+            lockfiles={"Gemfile.lock": "@@\n+  remote: https://gems.evil.example/\n"})
+        titles = [f["title"] for f in produced]
+        assert any("CLAUDE.md" in x for x in titles), titles
+        assert any("ticket" in x for x in titles), titles
+        assert any("registry" in x for x in titles), titles
         for f in produced:
             assert f.get("kind") == "deterministic", f["title"]
+
+    def test_the_lockfile_door_tags_too(self):
+        """`main` calls `lockfile_changes` DIRECTLY on the lockfile-only path,
+        so tagging in `run_all` alone would leave the one case this check was
+        written for counted as the model's."""
+        from agentic_review import checks
+        out = checks.lockfile_changes(
+            {"Gemfile.lock": "@@\n+  remote: https://gems.evil.example/\n"})
+        assert out and all(f.get("kind") == "deterministic" for f in out)
+
+    def test_no_finding_carries_the_tag_twice(self):
+        """Three dicts got the key twice from a blunt replacement; last-wins
+        hid it. A dict cannot hold a duplicate key, so this asserts the shape
+        that replaced it: one tag, applied once, at the door."""
+        from agentic_review import checks
+        out = checks.lockfile_changes(
+            {"Gemfile.lock": "@@\n+  remote: https://gems.evil.example/\n"})
+        assert [k for k in out[0] if k == "kind"] == ["kind"]
 
     def test_the_eval_split_reads_the_tag(self):
         import sys, pathlib

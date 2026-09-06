@@ -125,7 +125,6 @@ def ticket_in_title(title):
         return []
     return [{
         "severity": "medium",
-        "kind": "deterministic",
         "file": "",
         "line": 0,
         "title": f"PR title does not name a ticket (expected e.g. {_example()})",
@@ -205,7 +204,6 @@ def agent_session_url(commits, pr_body=""):
         return []
     return [{
         "severity": "medium",
-        "kind": "deterministic",
         "file": "",
         "line": 0,
         "title": "agent-written commit with no session link",
@@ -226,6 +224,19 @@ def agent_session_url(commits, pr_body=""):
     }]
 
 
+def _deterministic(findings):
+    """Tag what this module produced, at the door rather than in each dict.
+
+    TAGGING EACH FINDING WHERE IT IS BUILT is what the first version did, and
+    two of the five checks were missed while three got the key twice — a blunt
+    replacement, and a test that happened to exercise neither of the two.
+    Everything leaving this module is deterministic BY CONSTRUCTION, so it is
+    marked at the two exits callers actually use: no future check can forget,
+    because no future check has to remember.
+    """
+    return [dict(f, kind="deterministic") for f in findings]
+
+
 def run_all(work, changed_paths, title="", commits=(), pr_body="", diff="",
             lockfiles=None):
     """Every deterministic check, in severity-independent order.
@@ -233,11 +244,12 @@ def run_all(work, changed_paths, title="", commits=(), pr_body="", diff="",
     Called AFTER the agent, so the model never sees these and cannot be
     influenced into repeating or contradicting one.
     """
-    return (ticket_in_title(title)
-            + agent_session_url(commits, pr_body)
-            + route_without_test(work, diff)
-            + lockfile_changes(lockfiles)
-            + claude_md_size(work, changed_paths))
+    return _deterministic(
+        ticket_in_title(title)
+        + agent_session_url(commits, pr_body)
+        + route_without_test(work, diff)
+        + lockfile_changes(lockfiles)
+        + claude_md_size(work, changed_paths))
 
 
 # --------------------------------------------------------------------------
@@ -360,8 +372,6 @@ def route_without_test(work, diff):
             continue
         out.append({
             "severity": "medium",
-            "kind": "deterministic",
-        "kind": "deterministic",
             "file": file_path,
             "line": 0,
             "title": f"new route {route} is not named by any test",
@@ -494,8 +504,6 @@ def foreign_registries(lockfiles):
         named = ", ".join(f"`{h}` ({n})" for h, n in sorted(hosts.items()))
         out.append({
             "severity": "medium",
-            "kind": "deterministic",
-        "kind": "deterministic",
             "file": path,
             "line": 0,
             "title": f"{path} resolves from a host that is not the usual registry",
@@ -534,8 +542,6 @@ def integrity_without_version(lockfiles):
         if suspect:
             out.append({
                 "severity": "medium",
-            "kind": "deterministic",
-        "kind": "deterministic",
                 "file": path,
                 "line": 0,
                 "title": (f"{path}: {suspect} artifact hash(es) changed with no "
@@ -552,5 +558,11 @@ def integrity_without_version(lockfiles):
 
 
 def lockfile_changes(lockfiles):
-    """Every lockfile question, in the order a reader would ask them."""
-    return foreign_registries(lockfiles) + integrity_without_version(lockfiles)
+    """Every lockfile question, in the order a reader would ask them.
+
+    Tagged here too: `main` calls this DIRECTLY on the lockfile-only path, so
+    tagging in `run_all` alone would leave the findings of the one case this
+    check was written for counted as the model's.
+    """
+    return _deterministic(
+        foreign_registries(lockfiles) + integrity_without_version(lockfiles))
