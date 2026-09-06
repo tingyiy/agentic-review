@@ -616,7 +616,8 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.setattr(prr, "_pr_is_gone", lambda *a: None)
         monkeypatch.setattr(prr, "post_review",
                             lambda repo, n, ev, body, head_sha="", truncated=False,
-                            unread=(), pr_files=(): (seen.update(unread=list(unread)), ev)[1])
+                            unread=(), pr_files=(): (seen.update(
+                                unread=list(unread), pr_files=list(pr_files)), ev)[1])
         monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
             {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
              "user": {"login": "someone"}, "head": {"sha": "a" * 40}}))
@@ -624,6 +625,10 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.delenv("DRY", raising=False)
         prr.main()
         assert seen["unread"] == ["data/huge.jsonl"]
+        # AND what the PR touches, which is how a cited token is known to be a
+        # file at all. Dropping it falls back to the shape test and brings the
+        # never-clears trap back — silently, until this assertion.
+        assert "x" in seen["pr_files"]
 
     def test_the_all_oversized_exit_hands_over_every_file(self, monkeypatch, pr_review):
         """It read NOTHING, so it may not clear a block about any of it. That
@@ -639,8 +644,9 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.setattr(prr, "_pr_is_gone", lambda *a: None)
         monkeypatch.setattr(prr, "post_review",
                             lambda repo, n, ev, body, head_sha="", truncated=False,
-                            unread=(), pr_files=(): (seen.update(unread=list(unread),
-                                                    truncated=truncated), ev)[1])
+                            unread=(), pr_files=(): (seen.update(
+                                unread=list(unread), pr_files=list(pr_files),
+                                truncated=truncated), ev)[1])
         monkeypatch.setattr(prr.status, "done", lambda *a: None)
         monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
             {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
@@ -649,6 +655,7 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         monkeypatch.delenv("DRY", raising=False)
         prr.main()
         assert seen["unread"] == ["data/huge.jsonl"] and seen["truncated"] is True
+        assert seen["pr_files"] == ["data/huge.jsonl"]
 
     MIXED = ("🔴 **read one** — [`src/app.py:12`](http://x)\n"
              "🟡 **no line** — `data/huge.jsonl`\n"

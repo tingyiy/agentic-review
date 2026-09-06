@@ -160,7 +160,8 @@ class TestARefusedApprovalStillClearsOurOwnBlock:
         monkeypatch.setattr(
             pr, "_dismiss_stale_block",
             lambda repo, prn, event, head, trunc, unread=(), pr_files=():
-            seen.update(event=event, unread=list(unread)) or [])
+            seen.update(event=event, unread=list(unread),
+                        pr_files=list(pr_files)) or [])
         _wire(monkeypatch, refusal)
         return seen
 
@@ -178,5 +179,9 @@ class TestARefusedApprovalStillClearsOurOwnBlock:
         truncated review clears a block about a file it never opened."""
         seen = self._wire_dismissal(
             monkeypatch, '{"errors":["GitHub Apps are not permitted to approve"]}')
-        pr.post_review("app", 1, "APPROVE", "body", unread=["data/huge.jsonl"])
+        pr.post_review("app", 1, "APPROVE", "body", unread=["data/huge.jsonl"],
+                       pr_files=["Makefile"])
         assert seen.get("unread") == ["data/huge.jsonl"]
+        # BOTH arguments: `_cited_files` needs the second to know a cited token
+        # is a file at all, and without it the shape test comes back.
+        assert seen.get("pr_files") == ["Makefile"]
