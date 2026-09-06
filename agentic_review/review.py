@@ -156,6 +156,13 @@ def pr_diff(repo, pr):
             continue
         header = blob.split("\n", 1)[0]
         m = re.search(r"^\+\+\+ b/(.+)$", blob, re.M)
+        if not m:
+            # A DELETION HAS NO `+++ b/` — it is `/dev/null`. Recording the
+            # `diff --git a/x b/x` header as the path made a deletion large
+            # enough to be excluded unrecoverable: nothing downstream could
+            # match it against a real path, so it fell out of the since-list
+            # and the touched-paths set (SCRUM-1265).
+            m = re.search(r"^--- a/(.+)$", blob, re.M)
         path = m.group(1).strip() if m else header
         if SKIP.search(header):
             # THE PATH, not just a tally. A caller that knows only "3 files
@@ -465,7 +472,7 @@ def conversation(repo, pr):
     # four measurements") lived in a commit message, and this function returned
     # an empty conversation on every round. The block below then told the model
     # not to repeat itself while showing it nothing it had already been told.
-    items = []
+    items, cut_short = [], False
     for path, kind, cap in (
         # `per_page=100` ON ALL FOUR. Three of these were left at GitHub's
         # default of 30 because "they never exceed it" — but the default returns
@@ -480,7 +487,14 @@ def conversation(repo, pr):
         (f"/repos/{ORG}/{repo}/pulls/{pr}/commits", "commit", 1500),
     ):
         try:
-            for c in _paged(path):
+            page = _paged(path)
+            # THE NEWEST EXCHANGE IS WHAT IS MISSING when a walk truncates, and
+            # this block's whole instruction is "you already said this". Told
+            # that over an incomplete history, the model can be scolded for
+            # repeating something it was never shown (SCRUM-1265).
+            if getattr(page, "truncated", False):
+                cut_short = True
+            for c in page:
                 if kind == "commit":
                     # A commit is shaped differently: the prose is under
                     # `commit.message`, and the author is the committer rather
@@ -547,6 +561,15 @@ def conversation(repo, pr):
               f"({used:,} chars); {dropped} older item(s) dropped", flush=True)
     if not out:
         return ""
+    # THE INSTRUCTION SOFTENS WHEN THE HISTORY IS INCOMPLETE. "Do not repeat
+    # yourself" over a conversation missing its newest items is an instruction
+    # to be wrong in the direction of silence.
+    if cut_short or dropped:
+        return ("\nSAID ON THIS PR SO FAR — this history is INCOMPLETE (its newest\n"
+                "items did not fit), so treat it as context rather than as a full\n"
+                "record: do not overrule the author, and where something here\n"
+                "answers a point, it is answered. Commit messages count.\n\n"
+                + "\n\n".join(out) + "\n")
     return ("\nALREADY SAID ON THIS PR — do not repeat yourself, and do not overrule\n"
             "the author. A reasoned rejection is a DECISION, not an open defect. If\n"
             "you still disagree, say so ONCE, acknowledge their reason, and say what\n"
@@ -3103,6 +3126,17 @@ def _someone_replied_since(repo, pr, when):
             print(f"[pr-review] could not read {base.rsplit('/', 1)[-1]}: "
                   f"{type(e).__name__}")
             continue
+        # TRUNCATED MEANS THE NEWEST ARE MISSING, and the newest is where a
+        # rebuttal lands — these endpoints are oldest-first. Computing `newest`
+        # from what survived would answer "nobody replied" about a thread whose
+        # reply was simply not fetched, and the caller SKIPS the review on that
+        # answer. A review that never happens is the worst outcome this module
+        # has, so the unanswerable case says "something was said" and pays for
+        # a review instead (SCRUM-1265).
+        if getattr(items, "truncated", False):
+            print(f"[pr-review] {base.rsplit('/', 1)[-1]} was truncated — "
+                  "assuming a reply rather than skipping the review")
+            return True
         for c in items:
             if base.endswith("/commits"):
                 # A MERGE COMMIT IS NOT A REPLY. update-branch is a
@@ -3166,6 +3200,15 @@ def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body="",
     property `_release_review_request` exists to protect.
     """
     revs = _reviews(repo, pr) if revs is None else revs
+    # THE SAME RULE ONE LEVEL UP. Every skip below reasons from "our reviews",
+    # and a truncated list is missing the NEWEST of them — so `last_at`, `last`
+    # and the approved-at-this-commit test are all answering about a review
+    # that may not be the last one. Reviewing again costs minutes; skipping
+    # wrongly costs the review entirely (SCRUM-1265).
+    if getattr(revs, "truncated", False):
+        print("[pr-review] the review list was truncated — reviewing rather "
+              "than skipping on a stale newest review")
+        return None
     me = _me()
     mine = [r for r in revs if (r.get("user") or {}).get("login") == me] if me else []
     if not mine:
