@@ -560,7 +560,17 @@ def conversation(repo, pr):
         print(f"  conversation: {len(chosen)} of {len(items)} items "
               f"({used:,} chars); {dropped} older item(s) dropped", flush=True)
     if not out:
-        return ""
+        # AN EMPTY HISTORY AND AN EMPTY-BUT-TRUNCATED ONE ARE NOT THE SAME.
+        # Every surviving item can have an empty body (bare APPROVEs) while the
+        # newest — the ones that did not fit — are the whole conversation. This
+        # return ran BEFORE the incomplete-history branch, so exactly that case
+        # showed the model nothing and read as a clean empty thread: the silent
+        # truncation this change exists to end. Found by the reviewer on the PR
+        # that added it.
+        return ("\nSAID ON THIS PR SO FAR — this history is INCOMPLETE (its newest\n"
+                "items did not fit) and nothing survived the cut, so treat the\n"
+                "absence of a conversation here as unknown rather than as\n"
+                "silence.\n") if cut_short else ""
     # THE INSTRUCTION SOFTENS WHEN THE HISTORY IS INCOMPLETE. "Do not repeat
     # yourself" over a conversation missing its newest items is an instruction
     # to be wrong in the direction of silence.
@@ -3133,6 +3143,11 @@ def _someone_replied_since(repo, pr, when):
         # answer. A review that never happens is the worst outcome this module
         # has, so the unanswerable case says "something was said" and pays for
         # a review instead (SCRUM-1265).
+        # BEFORE THE PER-ITEM FILTER, DELIBERATELY. The filter below answers
+        # about items we HAVE; truncation is about the ones we do NOT. "Every
+        # surviving non-ours item is old" says nothing at all about the newest
+        # items that were never fetched, and those are the likeliest to be the
+        # reply. Asked and answered on the PR that added this.
         if getattr(items, "truncated", False):
             print(f"[pr-review] {base.rsplit('/', 1)[-1]} was truncated — "
                   "assuming a reply rather than skipping the review")

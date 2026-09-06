@@ -108,3 +108,21 @@ class TestADeletionKeepsItsPath:
         monkeypatch.setattr(pr, "gh", lambda *a, **k: self.DELETION)
         diff, _, _ = pr.pr_diff("repo", 1)
         assert "gone.ts" in pr._diff_paths_with_deletions(diff.full)
+
+
+class TestAnEmptyTruncatedHistoryStillSaysSo:
+    """The `if not out: return ""` guard ran before the incomplete branch, so a
+    thread whose surviving items all had empty bodies — bare APPROVEs — showed
+    the model nothing and read as a clean empty conversation. That is the
+    silent truncation this change exists to end, one branch earlier."""
+
+    def test_nothing_survived_but_the_history_is_incomplete(self, monkeypatch):
+        monkeypatch.setattr(pr, "_paged", lambda path, **kw: _paged_result(
+            [{"user": {"login": "octocat"}, "body": "",
+              "created_at": "2026-01-01T00:00:00Z"}], True))
+        out = pr.conversation("r", 1)
+        assert "INCOMPLETE" in out and "unknown rather than as" in out
+
+    def test_a_genuinely_empty_thread_still_says_nothing(self, monkeypatch):
+        monkeypatch.setattr(pr, "_paged", lambda path, **kw: _paged_result([], False))
+        assert pr.conversation("r", 1) == ""
