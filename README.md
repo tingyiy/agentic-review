@@ -153,6 +153,65 @@ the deliberation belongs in the **loop**, where every tool result is grounded
 evidence — which is worth more than unbounded thinking about a diff the model
 has not looked past.
 
+## What it produces, measured
+
+789 findings across 117 pull requests over nine days, in twelve repositories,
+scored on **what the author did next** rather than on how many were posted.
+
+**697 of the 789 are scored below.** The other 92 say nothing either way: 82 had
+no commit at all after the review, and 10 cite no file for a file-based proxy to
+watch — every "PR title does not name a ticket". Counting either as ignored
+would be the flattering mistake in reverse.
+
+The proxy is *did a commit after the review touch the file the finding cites*.
+It suits a workflow where a finding is answered by a push, and it is wrong in
+both directions — a fix can land in another file, and a file can change for its
+own reasons — so it is reported beside a control:
+
+**Per finding** — of the findings a later commit could speak to, how many had
+their cited file touched:
+
+| | n | cited file touched afterwards |
+|---|---|---|
+| **model findings** (of 732 posted) | 659 | **91.0%** |
+| high | 38 | 100.0% |
+| medium | 243 | 93.4% |
+| low | 378 | 88.6% |
+| deterministic checks (of 57 posted) | 38 | 42.1% |
+
+**Per file** — the control, and a DIFFERENT population: one row per file per
+review, not per finding, which is why its with-finding figure is not the 91.0%
+above:
+
+| | n | touched after that review |
+|---|---|---|
+| files a review cited | 523 | **86.8%** |
+| files the same PRs changed that no review mentioned | 1031 | **47.2%** |
+
+A **39.6-point gap**, about nineteen standard errors. The control is measured
+from the same review's timestamp and restricted to files that existed when it
+ran, so it is not "the author kept pushing".
+
+**The deterministic checks are counted separately, and should be.** They repeat
+on every review until the author fixes them, so folding them in credits or
+damns the model for work it did not do — and they behave differently: 42.1%,
+and 22 of the 81 findings nobody acted on are them.
+
+**What this does not say.** Nothing about RECALL: it measures what happened to
+findings that were posted, never the defects that were missed. And nothing
+about correctness — "acted on" is not "accepted". Sampled findings carry author
+replies of the form *"half of this is right, and I've fixed that half;
+disagreeing with the other half, with evidence"*.
+
+**How it was wrong first.** The pull request publishing these numbers was
+reviewed by this tool, which found six defects in the METHOD across eight
+rounds — three of them biasing the result in its author's favour. The control
+read 28.3 → 35.7 → 53.5 → 39.8 → 42.7 → 39.6 points as each was fixed. One
+suggested fix named a real mechanism and predicted the wrong direction, which
+only running it revealed: **a suggested fix is a hypothesis.** That history is
+kept with the numbers rather than tidied away, because a figure that moved six
+times should be audited, not trusted.
+
 ## Evaluating a change to it
 
 `eval/` runs the reviewer against pull requests that already have a human or
