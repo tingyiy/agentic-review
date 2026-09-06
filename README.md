@@ -168,6 +168,9 @@ It suits a workflow where a finding is answered by a push, and it is wrong in
 both directions — a fix can land in another file, and a file can change for its
 own reasons — so it is reported beside a control:
 
+**Per finding** — of the findings a later commit could speak to, how many had
+their cited file touched:
+
 | | n | cited file touched afterwards |
 |---|---|---|
 | **model findings** (of 732 posted) | 659 | **91.0%** |
@@ -175,7 +178,15 @@ own reasons — so it is reported beside a control:
 | medium | 243 | 93.4% |
 | low | 378 | 88.6% |
 | deterministic checks (of 57 posted) | 38 | 42.1% |
-| **control: files the same PRs changed that no review mentioned** | 1031 | **47.2%** |
+
+**Per file** — the control, and a DIFFERENT population: one row per file per
+review, not per finding, which is why its with-finding figure is not the 91.0%
+above:
+
+| | n | touched after that review |
+|---|---|---|
+| files a review cited | 523 | **86.8%** |
+| files the same PRs changed that no review mentioned | 1031 | **47.2%** |
 
 A **39.6-point gap**, about nineteen standard errors. The control is measured
 from the same review's timestamp and restricted to files that existed when it
