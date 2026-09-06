@@ -532,3 +532,95 @@ class TestADryRunNeverWritesToARealPR:
         with pytest.raises(prr.ReviewError):
             prr._main_unless_superseded()
         assert released == [("portal-api", 150)]
+
+
+class TestTruncationOnlyMattersWhereTheBlockIs:
+    """SCRUM-1293. Refusing to dismiss on ANY truncated review became a trap
+    once a file could be excluded permanently: past `MAX_FILE_DIFF` it is over
+    the ceiling in every future review too, so every review of that PR is
+    truncated and the block can never clear itself. infra#183 sat blocked
+    through three clean reviews until a human dismissed it by hand.
+
+    The question was never "was this review truncated" but "did it read the
+    file the block is ABOUT".
+    """
+
+    BLOCK = {"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
+             "user": {"login": "review-bot"},
+             "body": "🔴 **the defect** — [`src/app.py:12`](http://x)"}
+
+    def _wire(self, monkeypatch, prr, reviews):
+        calls = []
+
+        def gh(path, method="GET", body=None, accept=""):
+            calls.append((method, path))
+            return json.dumps(reviews)
+        monkeypatch.setattr(prr, "gh", gh)
+        monkeypatch.setattr(prr, "_me", lambda: "review-bot")
+        return calls
+
+    def test_a_block_whose_file_was_read_clears_even_when_truncated(
+            self, monkeypatch, pr_review):
+        prr = pr_review
+        self._wire(monkeypatch, prr, [self.BLOCK])
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=["data/huge.jsonl"]) == [1]
+
+    def test_a_block_whose_file_was_NOT_read_still_stands(
+            self, monkeypatch, pr_review):
+        """The case the blanket guard was written for, kept."""
+        prr = pr_review
+        self._wire(monkeypatch, prr, [self.BLOCK])
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=["src/app.py"]) == []
+
+    def test_a_block_naming_no_file_still_refuses_under_truncation(
+            self, monkeypatch, pr_review):
+        """No parseable path means no way to tell, and an unparseable body under
+        truncation is exactly what the old rule was right about."""
+        prr = pr_review
+        self._wire(monkeypatch, prr, [dict(self.BLOCK, body="🔴 **something** — nowhere")])
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=["x.py"]) == []
+
+    def test_an_untruncated_review_is_unaffected(self, monkeypatch, pr_review):
+        prr = pr_review
+        self._wire(monkeypatch, prr, [self.BLOCK])
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", False) == [1]
+
+    def test_the_head_must_still_have_moved(self, monkeypatch, pr_review):
+        """Re-reading the same code and reaching a different verdict is model
+        nondeterminism, not a fix — that rule is untouched."""
+        prr = pr_review
+        self._wire(monkeypatch, prr, [dict(self.BLOCK, commit_id="newsha")])
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=[]) == []
+
+    def test_main_hands_over_what_it_did_not_read(self, monkeypatch, pr_review):
+        """The wiring, not the helper: `unopened` is what the caveat names, and
+        it is what the dismissal has to be asked about."""
+        prr = pr_review
+        seen = {}
+        monkeypatch.setattr(prr, "pr_diff", lambda *a: (
+            "--- a/x\n+++ b/x\n@@\n+x\n", ["data/huge.jsonl"], 0))
+        monkeypatch.setattr(prr, "_already_reviewed", lambda *a, **k: "")
+        monkeypatch.setattr(prr, "checkout", lambda *a: None)
+        monkeypatch.setattr(prr, "build_context", lambda *a: "")
+        monkeypatch.setattr(prr.ctx, "skeletons", lambda *a: "")
+        monkeypatch.setattr(prr, "conversation", lambda *a: "")
+        monkeypatch.setattr(prr, "changed_since_last_review", lambda *a, **k: "")
+        monkeypatch.setattr(prr, "commit_messages", lambda *a: [])
+        monkeypatch.setattr(prr, "review_findings", lambda *a, **k: [])
+        monkeypatch.setattr(prr, "_revise", lambda f, w, r: (f, []))
+        monkeypatch.setattr(prr.checks, "run_all", lambda *a, **k: [])
+        monkeypatch.setattr(prr, "_pr_is_gone", lambda *a: None)
+        monkeypatch.setattr(prr, "post_review",
+                            lambda repo, n, ev, body, head_sha="", truncated=False,
+                            unread=(): (seen.update(unread=list(unread)), ev)[1])
+        monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
+            {"draft": False, "state": "open", "merged": False, "title": "SCRUM-1 x",
+             "user": {"login": "someone"}, "head": {"sha": "a" * 40}}))
+        monkeypatch.setattr(prr.sys, "argv", ["pr-review", "repo", "1"])
+        monkeypatch.delenv("DRY", raising=False)
+        prr.main()
+        assert seen["unread"] == ["data/huge.jsonl"]
