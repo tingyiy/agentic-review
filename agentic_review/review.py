@@ -64,8 +64,19 @@ from .errors import AgentFailed, PRClosed, ReviewError, Superseded
 
 
 #: Generated files are volume without signal, and they dominate a diff by size.
+#: Lockfile names, written ONCE. `SKIP` is built from this and `LOCKFILE`
+#: matches it, so a format cannot be checkable without being skipped or the
+#: reverse — which is what a comment claiming "these cannot drift" beside two
+#: hand-written lists bought: three of seven formats were in neither (found by
+#: this reviewer on the PR that added them).
+_LOCK_NAMES = (r"package-lock\.json|yarn\.lock|poetry\.lock|uv\.lock"
+               r"|bun\.lockb|pnpm-lock\.yaml|Cargo\.lock|Gemfile\.lock")
+
+#: The skipped files a deterministic check still wants to read.
+LOCKFILE = re.compile(r"(^|/)(" + _LOCK_NAMES + r")$")
+
 SKIP = re.compile(
-    r"(package-lock\.json|yarn\.lock|poetry\.lock|uv\.lock|bun\.lockb"
+    r"(" + _LOCK_NAMES +
     r"|\.(png|jpe?g|gif|svg|ico|webp|woff2?|map|snap|pdf|zip|onnx|wasm)$"
     r"|/dist/|/\.output/|/node_modules/)")
 
@@ -149,7 +160,7 @@ def pr_diff(repo, pr):
     defects are. Order within each group is git's.
     """
     raw = gh(f"/repos/{ORG}/{repo}/pulls/{pr}", accept="application/vnd.github.v3.diff")
-    files, skipped_paths = [], []
+    files, skipped_paths, lock_blobs = [], [], {}
     for i, chunk in enumerate(raw.split("\ndiff --git ")):
         blob = chunk if i == 0 else "diff --git " + chunk
         if not blob.strip():
@@ -170,6 +181,8 @@ def pr_diff(repo, pr):
             # this PR, and anything reasoning about which files the change
             # touches then treats it as untouched.
             skipped_paths.append(path)
+            if LOCKFILE.search(path):
+                lock_blobs[path] = blob
             continue
         files.append((path, blob))
     files.sort(key=lambda f: bool(_LOW_PRIORITY.search(f[0])))
@@ -212,6 +225,7 @@ def pr_diff(repo, pr):
     # bug the fingerprint was widened to fix in the first place.
     out.full = "\n".join(blob for _, blob in files + oversized)
     out.oversized = [p for p, _ in oversized]
+    out.lockfiles = lock_blobs
     return (out, [p for p, _ in remaining] + [p for p, _ in oversized],
             _Skipped(skipped_paths))
 
@@ -228,6 +242,15 @@ class _Diff(str):
     overflow = ()
     #: Every file the PR touches, whichever pass shows it.
     full = ""
+    #: The diffs of lockfiles this PR changes, keyed by path.
+    #:
+    #: A lockfile is SKIPPED for the model — burning a review budget on 40,000
+    #: generated lines buys nothing — which made it the one part of a pull
+    #: request no reviewer looks at, human or otherwise. A deterministic check
+    #: can read it cheaply, so the blob is kept here rather than thrown away
+    #: with the rest of the skipped text (SCRUM-1269).
+    lockfiles = ()
+
     #: Of the excluded, the ones no pass could hold — over `MAX_FILE_DIFF`
     #: rather than merely past the pass budget. They need a different knob, so
     #: the caveat has to be able to tell them apart.
@@ -3333,7 +3356,39 @@ def main():
     # EVERY FILE for the questions about the pull request itself — which paths
     # it touches, and the fingerprint that decides whether anything changed.
     whole = getattr(diff, "full", "") or diff
+    # THE FINGERPRINT COVERS THE LOCKFILE; THE CONTEXT DOES NOT. `whole` feeds
+    # `_diff_paths` and the cross-reference names, and 40,000 lines of JSON
+    # there would drown both — but the mark in the review body is what decides
+    # "has anything changed since the last review", and a lockfile-only push on
+    # top of an already-reviewed change is a change. Hashing only `whole` meant
+    # that push was skipped and its lockfile findings thrown away
+    # (SCRUM-1269, found by this reviewer).
+    fingerprinted = whole + "".join(
+        (getattr(diff, "lockfiles", None) or {}).values())
     truncated = bool(excluded)
+    # BEFORE EVERY EXIT THAT POSTS, not just the model one. This used to sit
+    # below the empty-diff return, so a lockfile-only pull request — the case
+    # this whole check exists for — never consulted it and re-posted the same
+    # finding on every re-request and every comment. A guard that runs after
+    # one of the doors is not a guard (found by this reviewer).
+    #
+    # ONE fetch, two readers: the nothing-new guard and the since-list ask the
+    # same endpoint the same question minutes apart.
+    revs = _reviews(repo, pr)
+    nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], fingerprinted,
+                                    title=meta.get("title") or "",
+                                    commits=commit_messages(repo, pr),
+                                    body=meta.get("body") or "", revs=revs)
+    if nothing_new:
+        print(f"nothing new to review: {nothing_new}")
+        return
+
+    # BEFORE THE EARLY RETURN, because the motivating case IS an empty diff.
+    # caeli-marketing#243 changed an image and a `package-lock.json`: every
+    # file skipped, nothing reviewable, and the lockfile check added for
+    # exactly that pull request would never have run on it. Found by this
+    # reviewer on the PR that added it (SCRUM-1269).
+    lock_findings = checks.lockfile_changes(getattr(diff, "lockfiles", None))
     if not diff.strip():
         # "NOTHING TO REVIEW" AND "I DID NOT READ IT" ARE DIFFERENT SENTENCES,
         # and the size ceiling made the second one wear the first's clothes: a
@@ -3341,22 +3396,47 @@ def main():
         # saying "no reviewable text in this change" about a 2 MB file somebody
         # deliberately committed is simply untrue. Found by this reviewer on the
         # PR that added the ceiling.
-        if excluded:
-            note = _unreviewed_files_note(list(excluded),
-                                          getattr(diff, "oversized", ()))
-            print(f"nothing reviewed: {len(excluded)} file(s) over "
-                  f"{MAX_FILE_DIFF:,} chars")
-            # `unread` IS EVERY FILE HERE. This run read nothing at all, so
-            # a block about any of them is one it cannot speak for — and
-            # without this the dismissal saw an EMPTY unread set and cleared
-            # exactly those blocks, which is the false-clean the guard exists
-            # to prevent. Found by this reviewer on the PR that narrowed the
-            # guard: the main path was threaded and this early return was not.
-            event = post_review(repo, pr, "COMMENT", note,
-                                head_sha=meta["head"]["sha"], truncated=True,
+        if excluded or lock_findings:
+            # ONE EXIT, BOTH FACTS. These were two branches and `excluded`
+            # came first, so a PR with an over-ceiling file AND a lockfile
+            # finding posted only the "too large" note and dropped the
+            # dependency warning — the third placement bug on this change, and
+            # the same shape as the other two: correct code behind a return
+            # that fires first. `render` already prepends the unreviewed-files
+            # note when given `excluded`, so one body carries both.
+            if lock_findings:
+                print(f"nothing reviewable, but {len(lock_findings)} lockfile "
+                      f"finding(s)", flush=True)
+            if excluded:
+                print(f"nothing reviewed: {len(excluded)} file(s) over "
+                      f"{MAX_FILE_DIFF:,} chars", flush=True)
+            body = (render(lock_findings, False, skipped,
+                           head_sha=meta["head"]["sha"], repo=repo,
+                           diff=fingerprinted, excluded=list(excluded),
+                           oversized=getattr(diff, "oversized", ()))
+                    if lock_findings
+                    else _unreviewed_files_note(list(excluded),
+                                                getattr(diff, "oversized", ())))
+            event = review_event(lock_findings) if lock_findings else "COMMENT"
+            if os.environ.get("DRY"):
+                # DRY's whole contract is that it prints what it WOULD do.
+                # This path posted anyway — a second exit that reached GitHub
+                # without passing the one guard (found by this reviewer).
+                print(f"--- would post {event} ---\n{body}")
+                return
+            # `unread` IS EVERY EXCLUDED FILE HERE. This run read none of them,
+            # so a block about any is one it cannot speak for — and without
+            # this the dismissal saw an EMPTY unread set and cleared exactly
+            # those blocks, which is the false-clean the guard exists to
+            # prevent. Found by this reviewer on the PR that narrowed it.
+            event = post_review(repo, pr, event, body,
+                                head_sha=meta["head"]["sha"],
+                                truncated=bool(excluded),
                                 unread=list(excluded), pr_files=list(excluded))
-            status.done(repo, meta["head"]["sha"], event,
-                        f"{len(excluded)} file(s) too large to review")
+            status.done(repo, meta["head"]["sha"], event, ", ".join(filter(None, [
+                f"{len(excluded)} file(s) too large to review" if excluded else "",
+                f"{len(lock_findings)} lockfile finding(s)" if lock_findings else "",
+            ])))
             return
         why = (f"{skipped} generated/binary file(s), nothing else changed"
                if skipped else "no reviewable text in this change")
@@ -3370,19 +3450,6 @@ def main():
              if overflow else "")
           + (f", TRUNCATED at {MAX_PASSES} passes" if truncated else "")
           + (f", {skipped} generated file(s) skipped" if skipped else ""), flush=True)
-
-    # NOTHING NEW, NOTHING TO SAY — checked here, before the checkout and the
-    # multi-minute agent run, because the whole point is not to spend them.
-    # ONE fetch, two readers: the nothing-new guard and the since-list ask the
-    # same endpoint the same question minutes apart.
-    revs = _reviews(repo, pr)
-    nothing_new = _already_reviewed(repo, pr, meta["head"]["sha"], whole,
-                                    title=meta.get("title") or "",
-                                    commits=commit_messages(repo, pr),
-                                    body=meta.get("body") or "", revs=revs)
-    if nothing_new:
-        print(f"nothing new to review: {nothing_new}")
-        return
 
     # ON THE PR PAGE from here on. The merge box shows only the newest run of
     # a workflow, and Copilot's automatic request starts a no-op one a second
@@ -3471,7 +3538,13 @@ def main():
         # influenced into repeating or contradicting one.
         findings += checks.run_all(work, changed, title=meta.get("title") or "",
                                    commits=commit_messages(repo, pr),
-                                   pr_body=meta.get("body") or "", diff=whole)
+                                   pr_body=meta.get("body") or "", diff=whole,
+                                   # Skipped for the model, read here: nobody
+                                   # else looks at a lockfile at all.
+                                   # Already computed before the early
+                                   # return; `run_all` re-deriving them would
+                                   # double every lockfile finding.
+                                   lockfiles=None) + lock_findings
 
     # UNREVIEWED MEANS UNOPENED. The agent can read anything in the checkout,
     # so a file the diff had no room for is not unreviewed if the agent went
@@ -3509,7 +3582,7 @@ def main():
     # review. Found by this reviewer on its own PR.
     body, event = _finalize_review(findings, withdrawn, truncated, skipped,
                                    head_sha=head_sha, repo=repo,
-                                   wire_fields=wire_fields, diff=whole,
+                                   wire_fields=wire_fields, diff=fingerprinted,
                                    excluded=unopened,
                                    saw_every_change=saw_every_change,
                                    # `whole` is a plain string by the time it
