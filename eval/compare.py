@@ -224,6 +224,14 @@ def run_ours(repo, pr, at=None):
             # look excellent and mean nothing.
             prior="")
         findings = review.review_findings(prompt, work)
+        # THE SAME SEQUENCE AS `main`, IN THE SAME ORDER. The comment above
+        # says this harness diverging from `main` is how a feature once
+        # measured itself as absent; it happened again on 2026-09-07, when the
+        # second look was wired into `main` only and an 18-run "gap arm" was in
+        # fact a second baseline sample — 0 of 18 runs logged the pass. A
+        # feature reachable only from `main` cannot be measured here, so
+        # anything `main` does between the pass and the revision belongs here.
+        findings += review._look_again(findings, work, repo, diff)
         findings, withdrawn = review._revise(findings, work, repo)
         findings += checks.run_all(work, changed, title=meta.get("title") or "",
                                    commits=review.commit_messages(repo, pr),
