@@ -848,6 +848,42 @@ def _capped(diff, limit):
             f"read_file rather than assuming it is absent.]\n")
 
 
+def build_prompt(repo, work, part, caveats="", context="", prior=""):
+    """The reviewer's prompt, and the diff text it was built from.
+
+    ONE PATH FOR EVERY CALLER, and that is the whole point of it existing.
+    The eval harness formatted `PROMPT` itself, and drifted from `main` three
+    times: it omitted `diff` (so the cross-reference section measured itself
+    as absent), it called the pass and the revision directly and never the
+    sequence between them (so an 18-run arm was a second baseline sample),
+    and it never expanded hunks at all — so every number taken before
+    2026-09-07 measured a reviewer prompted with bare hunks against a
+    production one prompted with the code around them. Two of those were
+    caught by review; the third was not caught for weeks. A shared path
+    cannot drift.
+
+    Returns `(prompt, shown)`. `shown` is what the model was given, which is
+    what a pass that wants to reason about coverage must be handed — not the
+    canonical diff.
+
+    THE PROMPT GETS THE EXPANDED DIFF; everything else keeps the canonical
+    one. `_diff_paths` and the `<!-- caeli-review diff:… -->` fingerprint both
+    read the canonical diff, and the fingerprint decides whether anything has
+    changed since the last review — expanding it would make every open PR look
+    freshly changed.
+
+    BELT AND BRACES on the size. `expand_hunks` returns the ORIGINAL diff when
+    expanding would breach the cap — `max_chars` bounds the expansion, not the
+    prompt — so nothing downstream of `pr_diff` was guarding what actually
+    reaches the model.
+    """
+    shown = _capped(ctx.expand_hunks(part, work, max_chars=int(MAX_DIFF * 1.6)),
+                    int(MAX_DIFF * 1.6))
+    prompt = PROMPT.format(repo=repo, path=work, diff=shown, caveats=caveats,
+                           context=context, prior=prior)
+    return prompt, shown
+
+
 def _other_passes_note(n, parts):
     """What the OTHER passes are holding, named for the pass that is running.
 
@@ -3736,23 +3772,10 @@ def main():
                 print(f"  pass {n + 1} of {len(overflow) + 1}: "
                       f"{len(part)} chars the first pass had no room for",
                       flush=True)
-            # THE PROMPT GETS THE EXPANDED DIFF; everything else keeps the
-            # canonical one. `_diff_paths` and the `<!-- caeli-review diff:… -->`
-            # fingerprint both read the whole diff, and the fingerprint is what
-            # decides whether anything has changed since the last review —
-            # expanding it would make every open PR look freshly changed the
-            # first time this shipped.
-            # BELT AND BRACES. `expand_hunks` returns the ORIGINAL diff when
-            # expanding would breach the cap — `max_chars` bounds the
-            # expansion, not the prompt — so nothing downstream of `pr_diff`
-            # was guarding the size of what actually reaches the model.
-            shown = _capped(ctx.expand_hunks(part, work,
-                                             max_chars=int(MAX_DIFF * 1.6)),
-                            int(MAX_DIFF * 1.6))
-            prompt = PROMPT.format(repo=repo, path=work, diff=shown,
-                                   caveats=caveats + _other_passes_note(
-                                       n, [str(diff)] + overflow),
-                                   context=context, prior=prior)
+            prompt, shown = build_prompt(
+                repo, work, part,
+                caveats=caveats + _other_passes_note(n, [str(diff)] + overflow),
+                context=context, prior=prior)
             found = review_findings(prompt, work, repo)
             # BEFORE the revision, so the revision judges the whole set — a
             # finding the second look adds deserves the same scrutiny as one
