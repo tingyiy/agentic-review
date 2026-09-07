@@ -22,6 +22,7 @@ import os
 import re
 import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -69,7 +70,8 @@ DEFAULT_REASONING_EFFORT = "none"
 #: against, and nothing about it is true. `REVIEW_PRICE_PER_MTOK` (input,
 #: cached-input, output — comma separated, USD per million) turns the estimate
 #: on and names where the numbers came from.
-USAGE = {"calls": 0, "prompt": 0, "cached": 0, "completion": 0, "by_provider": {}}
+USAGE = {"calls": 0, "prompt": 0, "cached": 0, "completion": 0, "estimated": 0,
+         "by_provider": {}}
 
 
 def _price():
@@ -89,14 +91,17 @@ def _price():
 
 def reset_usage():
     global _PREFER_FAILOVER
-    USAGE.update(calls=0, prompt=0, cached=0, completion=0, by_provider={})
+    USAGE.update(calls=0, prompt=0, cached=0, completion=0, estimated=0,
+                 by_provider={})
     # A new review starts on the cheap provider again.
     _PREFER_FAILOVER = False
 
 
-def _record(provider, model, body, headers):
+def _record(provider, model, body, headers, estimated=False):
     """Tally one call. Never raises — accounting must not cost a review."""
     try:
+        if estimated:
+            USAGE["estimated"] += 1
         u = body.get("usage") or {}
         prompt = int(u.get("prompt_tokens") or 0)
         completion = int(u.get("completion_tokens") or 0)
@@ -146,6 +151,9 @@ def usage_line():
                 + u["completion"] * price[2]) / 1_000_000
         saved = u["cached"] * (price[0] - price[1]) / 1_000_000
         line += f" — ${cost:.4f} (caching saved ${saved:.4f})"
+    if u["estimated"]:
+        line += (f"; {u['estimated']} call(s) cut mid-stream and estimated "
+                 f"from their length")
     return line
 
 
@@ -185,15 +193,193 @@ def _reasoning_payload(effort, failover=False):
     return {"reasoning_effort": effort}
 
 
+#: THE LOOP GUARD. deepseek-v4-flash with reasoning off thinks aloud in
+#: `content` instead — "Now let me look at…", "Let me now check…" — and at
+#: temperature 0.2 on a long transcript that narration falls into a cycle it
+#: never leaves. Captured on caeli-marketing#268, 2026-09-07: 62,451 chars of
+#: content, no tool call, no JSON, 433 lines of which 12 were distinct and one
+#: two-sentence pair appeared 136 times. 83 seconds and the whole 16,384-token
+#: budget, then `finish_reason=length` and a retry that answered in 4s.
+#:
+#: Across 28 recent runs in 7 repos, half had at least one: 24 truncations at
+#: 80-100s each, plus five "answers" of 17k-62k chars that stopped just under
+#: the cap, two of which lost the revision as malformed JSON. That is more
+#: wall-clock and more output tokens than the reviews themselves.
+#:
+#: A repeat is visible long before the budget is: the reply is read as a
+#: stream, and once the last LOOP_WINDOW characters have already appeared
+#: LOOP_REPEATS times the connection is closed. A genuine answer never repeats
+#: 200 characters verbatim four times; the observed loops do so within the
+#: first ~1,500 characters of the cycle.
+LOOP_WINDOW = 200
+LOOP_REPEATS = 4
+#: THE OTHER SHAPE OF THE SAME FAILURE: narration that does not cycle, or
+#: cycles with a period of thousands of characters. On the first live run of
+#: the tail check the four cuts came at 19k-48k chars and 30-83s — a cycle
+#: whose period is 7k chars recurs four times only after 30k. And replaying a
+#: forced turn produced 8k-60k chars of prose with no tool call in 16 of 24
+#: samples, which the loop would then have parsed as the answer and refused.
+#: An agent turn that has written this much prose — not JSON, not a tool call
+#: — is thinking aloud, and nothing it says past here is used. Free answers
+#: seen in 28 runs topped out at 8.3k chars and were JSON.
+PROSE_CAP = 8_000
+#: No verdict before this much content: the window has to have had room to
+#: recur, and a short reply is cheap to let finish.
+LOOP_MIN_CHARS = 1_500
+#: Check on every this-many characters of growth, not every chunk — `count`
+#: over the accumulated text is O(n) and chunks arrive at ~100/s.
+LOOP_CHECK_EVERY = 500
+
+
+class Looping(ReviewError):
+    """The reply was cut because it was repeating itself. Carries what was
+    seen so the caller can say so — and, unlike a truncation, nothing here is
+    worth keeping: the text is a cycle, not a long answer."""
+
+    def __init__(self, provider, model, chars, repeats, elapsed, tail=""):
+        self.chars, self.repeats, self.elapsed = chars, repeats, elapsed
+        # WHAT IT WAS SAYING, for the log: a loop's shape is the only clue to
+        # what triggered it, and the text is otherwise thrown away.
+        self.tail = " ".join(tail.split())[-120:]
+        shape = (f"the last {LOOP_WINDOW} of them seen {repeats} times"
+                 if repeats else "prose with no tool call and no JSON")
+        super().__init__(
+            f"{provider} {model} was {'repeating itself' if repeats else 'narrating'}"
+            f" and was cut off: {chars:,} chars, {shape}, after {elapsed:.0f}s")
+
+
+def narrating(content):
+    """Prose, as opposed to the JSON an answer is, or a fenced block."""
+    head = content.lstrip()[:2]
+    return not (head.startswith("{") or head.startswith("[")
+                or head.startswith("`"))
+
+
+def repeats(content):
+    """How many times the last LOOP_WINDOW characters of `content` already
+    occur in it — 1 for any text long enough to look at, 0 below LOOP_MIN_CHARS.
+    A pure function so the guard is testable without a socket."""
+    if len(content) < LOOP_MIN_CHARS:
+        return 0
+    return content.count(content[-LOOP_WINDOW:])
+
+
+def _read_stream(r, provider, model, on_content=None):
+    """Assemble one streamed chat completion into the non-streaming shape:
+    `(choice, usage)` with `choice = {"message": {...}, "finish_reason": ...}`.
+
+    The message carries `content`, `reasoning_content` (when the provider sent
+    any) and `tool_calls` assembled by index from their argument fragments.
+    `on_content(text_so_far)` is called as content grows and may raise to stop
+    the read — that is the loop guard's hook.
+    """
+    content, reasoning = [], []
+    calls = {}
+    finish = None
+    usage = None
+    total = 0
+    for raw in r:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue  # SSE comments ("": OPENROUTER PROCESSING") and keepalives
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            continue
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        for choice in chunk.get("choices") or []:
+            if choice.get("finish_reason"):
+                finish = choice["finish_reason"]
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                content.append(delta["content"])
+                total += len(delta["content"])
+                if on_content is not None:
+                    on_content(total, content)
+            if delta.get("reasoning_content"):
+                reasoning.append(delta["reasoning_content"])
+            for tc in delta.get("tool_calls") or []:
+                slot = calls.setdefault(tc.get("index", 0),
+                                       {"id": "", "type": "function",
+                                        "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] += fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"]
+    message = {"role": "assistant", "content": "".join(content)}
+    if reasoning:
+        message["reasoning_content"] = "".join(reasoning)
+    if calls:
+        message["tool_calls"] = [calls[i] for i in sorted(calls)]
+    return {"message": message, "finish_reason": finish}, usage
+
+
 def _post(url, key, payload, timeout, provider, model):
+    # STREAMED, so a reply can be judged while it is still arriving. The
+    # non-streaming shape is rebuilt from the chunks (`_read_stream`), so
+    # nothing above this function knows the difference — except that a
+    # repeating reply now costs seconds instead of the whole budget.
+    payload = dict(payload, stream=True,
+                   stream_options={"include_usage": True})
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  method="POST")
     req.add_header("Authorization", f"Bearer {key}")
     req.add_header("Content-Type", "application/json")
+    started = time.monotonic()
+    mark = [0]
+
+    agent_turn = bool(payload.get("tools"))
+
+    def guard(total, parts):
+        if total < LOOP_MIN_CHARS or total - mark[0] < LOOP_CHECK_EVERY:
+            return
+        mark[0] = total
+        parts[:] = ["".join(parts)]  # keep the join amortised
+        seen = repeats(parts[0])
+        if seen >= LOOP_REPEATS:
+            raise Looping(provider, model, total, seen,
+                          time.monotonic() - started, tail=parts[0])
+        # Only an AGENT turn: a plain `chat` is asked for prose sometimes.
+        if agent_turn and total >= PROSE_CAP and narrating(parts[0]):
+            raise Looping(provider, model, total, 0,
+                          time.monotonic() - started, tail=parts[0])
+
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             headers = {k.lower(): v for k, v in r.headers.items()}
-            body = json.loads(r.read().decode())
+            if "json" in (headers.get("content-type") or ""):
+                # A provider that ignored `stream`. The old shape, unchanged.
+                body = json.loads(r.read().decode())
+                usage = body.get("usage")
+                choices = body.get("choices") or []
+                choice = choices[0] if choices else None
+            else:
+                choice, usage = _read_stream(r, provider, model, on_content=guard)
+    except Looping as e:
+        # THE BILL IS STILL REAL. Nothing about the tokens generated before the
+        # cut is refunded, and the usage chunk never arrives on a stream that
+        # was closed — so the call is tallied from what was received, at the
+        # ~3.5 chars/token these replies measure at, and the line says so.
+        # The prompt of an agent turn is the same conversation as the turn
+        # before, so it was served from the cache at the rate this run has
+        # measured so far; pricing it as fresh made the guard look like it
+        # raised the bill (a run's line read $0.34 against $0.25 for the old
+        # code, on fewer real tokens).
+        prompt = _estimate_tokens(payload)
+        rate = (USAGE["cached"] / USAGE["prompt"]) if USAGE["prompt"] else 0.0
+        _record(provider, model, {"usage": {
+            "prompt_tokens": prompt,
+            "completion_tokens": int(e.chars / 3.5),
+            "prompt_tokens_details": {"cached_tokens": int(prompt * rate)}}},
+            {}, estimated=True)
+        raise
     except urllib.error.HTTPError as e:
         detail = e.read().decode()[:300]
         # 5xx and 429 are the provider. A 4xx is normally OUR payload and would
@@ -228,11 +414,19 @@ def _post(url, key, payload, timeout, provider, model):
         # other clauses exist to remove.
         raise _Retryable(f"{provider} {model} connection dropped mid-response: "
                          f"{type(e).__name__}: {e}")
-    _record(provider, model, body, headers)
-    choices = body.get("choices") or []
-    if not choices:
-        raise _Retryable(f"{provider} returned no choices: {json.dumps(body)[:200]}")
-    return choices[0]
+    _record(provider, model, {"usage": usage}, headers)
+    if choice is None:
+        raise _Retryable(f"{provider} returned no choices")
+    return choice
+
+
+def _estimate_tokens(payload):
+    """Prompt size when the provider never said: the request's text at the
+    ~3.5 chars/token these transcripts measure at. Only used on a cut stream."""
+    try:
+        return int(len(json.dumps(payload.get("messages", []))) / 3.5)
+    except (TypeError, ValueError):
+        return 0
 
 
 #: STICKY FAILOVER. Once Fireworks has failed in this process, later calls go
@@ -328,15 +522,16 @@ def chat(messages, model=DEFAULT_MODEL, max_tokens=8192, temperature=0.2,
 def chat_with_tools(messages, tools, model=DEFAULT_MODEL, max_tokens=8192,
                     temperature=0.2, timeout=180,
                     reasoning_effort=DEFAULT_REASONING_EFFORT,
-                    tool_choice="auto", response_format=None):
+                    tool_choice="auto", response_format=None, sampling=None):
     """One turn of a tool-using conversation. Returns the whole assistant MESSAGE.
 
     Truncation still raises: a tool call cut off mid-arguments is not
-    recoverable by retrying elsewhere.
+    recoverable by retrying elsewhere. `sampling` is extra request fields
+    (`repetition_penalty`, …) for the one call — the loop guard's retry.
     """
     payload = {"model": model, "messages": messages, "max_tokens": max_tokens,
                "temperature": temperature, "tools": tools,
-               "tool_choice": tool_choice}
+               "tool_choice": tool_choice, **(sampling or {})}
     payload.update(_reasoning_payload(reasoning_effort))
     if response_format:
         payload["response_format"] = response_format

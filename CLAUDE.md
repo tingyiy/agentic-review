@@ -47,6 +47,14 @@ consumer would move the risk without reducing it.
   call cut off mid-arguments cannot be salvaged. A cut-off final ANSWER can, and
   discarding ten turns of exploration to report it is the worst outcome
   available — hence exactly one retry asking for a shorter answer.
+- **A repeating or narrating reply is cut at the transport, not at the
+  budget.** Replies are streamed; one whose last 200 chars have already
+  appeared four times, or 8k chars of prose on an agent turn with no tool
+  call and no JSON, is closed (`llm.Looping`) instead of running to 16k
+  tokens and ~85s. The retry samples with `repetition_penalty` (the nudge
+  alone failed three live runs), once with the tools on, then forced — and a
+  forced turn ALWAYS carries `ANSWER_SCHEMA`: without one it produced usable
+  JSON once in 24 replays. Never ask for "shorter": nothing in a cycle was long.
 - **A merged PR is not worth reviewing and must not be alerted about.** Three
   windows: before the run starts, during the loop (checked between turns), and
   between the answer and the POST.

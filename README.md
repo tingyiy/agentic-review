@@ -153,6 +153,54 @@ the deliberation belongs in the **loop**, where every tool result is grounded
 evidence — which is worth more than unbounded thinking about a diff the model
 has not looked past.
 
+### Reasoning off has a failure mode of its own, and it is cut at the wire
+
+With its thinking disabled the model thinks in the message body instead —
+"Now let me look at…", "Let me now check…" — and on a long transcript that
+narration falls into a cycle it never leaves. Captured on a 23-file PR: 62,451
+characters of content, no tool call, no JSON, 433 lines of which 12 were
+distinct, one sentence pair 136 times. 83 seconds and the whole 16k-token
+budget, for a retry that then answered in four. Across 28 runs in seven repos,
+**half had at least one** — 24 truncations at 80-100s each, plus five replies of
+17k-62k characters that stopped just under the cap, two of which lost the
+revision as malformed JSON.
+
+So replies are **streamed**, and one is closed the moment it is no longer
+worth reading: the last 200 characters already seen four times, or 8k
+characters of prose on an agent turn with no tool call and no JSON. Nothing in
+a cycle is worth keeping, so the retry never asks for "shorter" — which is a
+licence to drop findings. What the retry does instead was chosen by replaying
+captured looping requests, four samples each:
+
+```
+exploration turn (tools on)         cycled again   tool call   narration
+  as reviewed (temp 0.2)                 5/8           3           0
+  repetition_penalty 1.1                 0/8           8           0
+  temperature 0.7                        0/8           8           0
+  frequency_penalty 0.5                  0/8           6           2
+
+forced answer turn (tools off)      usable JSON   prose 8k-60k   cycled/ran out
+  no schema, any of six samplers          1/24         16             7
+  findings JSON schema, three samplers   12/12          0             0
+```
+
+The retry samples with `repetition_penalty` 1.1, once with the tools on and
+then for the answer — and a forced turn always carries the answer schema, which
+is the one change that made the forced turn answer at all. The same PR, end to
+end, before and after:
+
+```
+                       old code       this
+wall                   17.4 min       7.6 min
+replies cut            5 × 77-95s     11 × 4-16s
+completion tokens      130,832        42,361
+outcome                2 findings,    2 findings
+                       1 revision lost
+```
+
+A cut call is still billed — the tokens were generated — and the usage line
+says how many were estimated from their length.
+
 ## What it produces, measured
 
 789 findings across 117 pull requests over nine days, in twelve repositories,

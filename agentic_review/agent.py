@@ -71,6 +71,17 @@ MAX_TRANSCRIPT_CHARS = int(os.environ.get("REVIEW_MAX_TRANSCRIPT", 600_000))
 #: small does not degrade the review, it destroys it.
 MAX_TOKENS = int(os.environ.get("REVIEW_MAX_TOKENS", 16_384))
 
+#: WHAT THE RETRY AFTER A CYCLE SAMPLES WITH. Measured by replaying two
+#: captured looping requests from caeli-marketing#268 four times each
+#: (2026-09-07): at the review's own settings 5 of 8 replies cycled again and
+#: 3 called a tool; with `repetition_penalty` 1.1 all 8 called a tool.
+#: (`temperature` 0.7 also went 8 for 8; `frequency_penalty` 0.5 stopped the
+#: cycling but 2 of 8 became long narrations with no tool call, which the loop
+#: would have read as the answer; `presence_penalty` 0.5 still cycled twice.)
+#: Applied to the retry turn ONLY: whether the review as a whole should sample
+#: this way is a question for the eval harness, not for this constant.
+LOOP_RETRY_SAMPLING = {"repetition_penalty": 1.1}
+
 #: A defensive cap on the loop itself. The real bound is the deadline; this
 #: catches a model that has stopped making progress but is still calling tools
 #: quickly (re-reading the same file, walking a directory tree one level at a
@@ -509,7 +520,8 @@ def resume(messages, question, root, deadline=300, max_turns=8, **kw):
 
 def run(system, user, root, model=None, deadline=900, max_turns=MAX_TURNS,
         max_tokens=MAX_TOKENS, log=print, on_turn=None, stats=None,
-        _messages=None, answer_schema=None, _transcript_cap=None):
+        _messages=None, answer_schema=None, schema_reask=True,
+        _transcript_cap=None):
     """Run the loop against a checkout and return the model's final text.
 
     `deadline` is WALL CLOCK for the whole loop, checked before every request and
@@ -559,6 +571,7 @@ def run(system, user, root, model=None, deadline=900, max_turns=MAX_TURNS,
     extra = 0
     MAX_EXTRA = 2
     kwargs = {"max_tokens": max_tokens, "timeout": REQUEST_TIMEOUT}
+    once = {}  # request fields for the NEXT call only; cleared after it
     if model:
         kwargs["model"] = model
 
@@ -617,10 +630,12 @@ def run(system, user, root, model=None, deadline=900, max_turns=MAX_TURNS,
                 "do not invent findings to fill the gap.")})
 
         t0 = time.monotonic()
+        this_call, once = once, {}
         try:
             reply = llm.chat_with_tools(
                 messages, TOOLS, tool_choice="none" if forced else "auto",
-                response_format=answer_schema if forced else None, **kwargs)
+                response_format=answer_schema if forced else None,
+                **kwargs, **this_call)
         except ReviewError as e:
             # A TRUNCATED FINAL ANSWER IS RECOVERABLE, and it is the one failure
             # here that throws away work rather than reporting it: measured on
@@ -632,9 +647,53 @@ def run(system, user, root, model=None, deadline=900, max_turns=MAX_TURNS,
             # ONCE. A second truncation means the budget is genuinely too small
             # for this PR, which is an operator problem and must be reported as
             # one rather than looped on.
+            # A REPEATING REPLY IS NOT A LONG ONE. The provider layer cuts a
+            # reply that has started cycling (`llm.Looping`) and nothing in
+            # it is worth keeping, so the retry must not ask for "shorter" —
+            # that instruction makes the model drop findings to fit a budget
+            # nothing had exceeded. It asks for what the turn should have
+            # been instead: a tool call or the answer, not narration. Same
+            # recovery allowance as a truncation, and for the same reason: a
+            # second cycle is the model's problem to report, not to loop on.
+            if isinstance(e, llm.Looping) and extra < MAX_EXTRA:
+                extra += 1
+                stats["loops"] = stats.get("loops", 0) + 1
+                shape = (f"repeated itself ({e.chars:,} chars, the last "
+                         f"{llm.LOOP_WINDOW} seen {e.repeats} times)" if e.repeats
+                         else f"narrated ({e.chars:,} chars of prose, no tool "
+                              f"call, no JSON)")
+                note(f"turn {turn}: the model {shape} and was cut off after "
+                     f"{e.elapsed:.0f}s — asking it to stop narrating. It was "
+                     f"saying: …{e.tail!r}")
+                # ONCE WITH THE TOOLS ON, THEN THE ANSWER. Measured on
+                # caeli-marketing#268: the first re-ask produced a real tool
+                # call (turn 27 read a test file), and the next turn cycled
+                # again, and the one after that — a review that had read
+                # twenty-five files failed with nothing posted. A model that
+                # has cycled twice is past useful exploration; what it has is
+                # worth more than a third attempt at more. A loop on a turn
+                # that was already forced stays forced.
+                force_next = forced or stats["loops"] >= 2
+                # THE NUDGE ALONE DOES NOT WORK — three live runs, three
+                # failures — the resample has to be made different.
+                once = {"sampling": LOOP_RETRY_SAMPLING}
+                messages.append({"role": "user", "content": (
+                    "Your last message repeated the same sentences over and "
+                    "over and was cut off; none of it was kept. Do not think "
+                    "aloud in the message body. "
+                    + ("Reply with the required JSON now, from what you have "
+                       "already read." if force_next else
+                       "Either call the tool you need next, or reply with "
+                       "the required JSON."))})
+                continue
             if ("finish_reason=length" in str(e) and not shortened
                     and extra < MAX_EXTRA):
                 shortened = force_next = True
+                # THE POSTED REVIEW SAYS SO. The retry asks the model to keep
+                # "the findings you are most confident in", which is a licence
+                # to drop some; a reader of the review deserves to know the
+                # list may be short (SCRUM-1243).
+                stats["shortened"] = True
                 extra += 1
                 note(f"turn {turn}: answer truncated at max_tokens — "
                      f"asking once for a shorter one")
@@ -675,7 +734,11 @@ def run(system, user, root, model=None, deadline=900, max_turns=MAX_TURNS,
             # whole failure this exists to end: on caeli-marketing#212 the
             # revision reasoned correctly for 7,410 characters and then finished
             # with a plain-text list, and the judgement was thrown away.
-            if answer_schema and not forced:
+            # `schema_reask=False` keeps the schema for FORCED turns only —
+            # the review passes' free answers parse as they are, and a
+            # forced turn without a schema is the one shape that measurably
+            # does not answer (see review.ANSWER_SCHEMA).
+            if answer_schema and schema_reask and not forced:
                 note(f"turn {turn}: re-asking the answer against the schema")
                 try:
                     shaped = llm.chat_with_tools(
