@@ -1899,6 +1899,170 @@ def _merge_opened(stats):
     _CURRENT["opened"] = opened
 
 
+#: The answer shape, apart from the prompt that first asks for it, because the
+#: second look asks for the same thing and a drifting copy would be a silent
+#: schema mismatch.
+ANSWER_SHAPE = """Reply with ONLY this JSON, no prose around it:
+{"findings":[{"file":"path","line":123,"severity":"high|medium|low",
+"title":"one specific line","detail":"the concrete failure and why",
+"fix":"at most two lines: the direction, naming the helper/field/ordering",
+"fix_verified":true}]}"""
+
+#: WHAT THE REVISION MAY ASK FOR, named so the optional pass can reserve it.
+#: Both resume the conversation from the same `_remaining_budget()` pool and
+#: the second look goes first, so without a reservation a long second look
+#: drives the revision to its 60s floor — which is the forced-on-turn-one,
+#: zero-tool-calls failure `RESUME_HEADROOM` exists to prevent, except now
+#: caused by an OPTIONAL pass degrading a mandatory one.
+REVISE_DEADLINE = 300
+
+#: And what the second look may ask for: less, because it is the optional
+#: one. It reads a handful of files it has already been pointed at, which is
+#: a smaller job than reconsidering every finding.
+GAP_DEADLINE = 120
+
+#: How many unread paths to name. The list is a pointer, not a work order —
+#: past a dozen the pass has bigger problems (that is the partial-review
+#: caveat's territory) and a long list crowds the conversation it resumes.
+MAX_GAP_PATHS = 12
+
+#: TELL IT WHERE IT DID NOT LOOK. A generic "what else do you find?" was
+#: measured on 2026-09-02 (rounds 7 and 8, three PRs, n=3): 28 findings became
+#: 39, but it can only re-report the reading the pass already did, so it
+#: plateaus on exactly the misses that matter — a defect in a file the agent
+#: never opened is not recoverable by asking again.
+#:
+#: The gap is not a guess. `read_ranges` records which LINES of which file were
+#: actually shown, so "changed files whose surrounding code was never read" is
+#: arithmetic. The diff hunks were in the prompt either way; what is missing is
+#: the code around them, which is where the cross-reference misses live.
+LOOK_AGAIN = """Before I take that as your answer: this pass is reviewing {n} file(s) you never opened.
+
+{paths}
+
+You saw their diff hunks in the prompt, but not the code around them — the callers, the tests, the types, the neighbouring functions. That is where the defects you cannot see from a hunk live.
+
+Read them now, then report ONLY what you find that is NOT already in your answer above. If they are genuinely clean, say so with an empty list rather than restating what you already said.
+
+{shape}"""
+
+
+def _unread_changed(shown_diff):
+    """Changed files this review has not actually read, worst first.
+
+    A file counts as read once the windows the agent asked for cover it —
+    `_merge_opened` already maintains that, and the same record drives the
+    posted "never opened" caveat. This asks it a question the caveat does not:
+    while there is still budget to do something about it.
+    """
+    ranges = _CURRENT.get("read_ranges") or {}
+    opened = _CURRENT.get("opened") or set()
+
+    def unseen(path):
+        seen = ranges.get(path)
+        total = (seen or {}).get("total")
+        if not total:
+            return None  # never opened at all, or size unknown
+        covered = set()
+        for lo, hi in seen.get("covered") or []:
+            # A WINDOW WITH NO FOOTER RAN TO THE END OF THE FILE, and its end
+            # is recorded as None — `covers_whole_file` clamps it to `total`
+            # and this must use the same rule. It did not, and `hi + 1` raised
+            # a TypeError that killed 6 of 18 eval runs on 2026-09-07.
+            covered.update(range(lo, (total if hi is None else hi) + 1))
+        return max(0, total - len(covered))
+
+    # ONE SPELLING ON BOTH SIDES. `read_ranges` and `opened` are keyed by
+    # `os.path.normpath` (that normalisation exists because `./src/big.py`
+    # once never matched `src/big.py`), while a diff header is raw. Comparing
+    # the two spellings reports a read file as unread, and then drops the
+    # finding it asked for.
+    out = []
+    for path in sorted(os.path.normpath(p) for p in _diff_paths(shown_diff)):
+        if path in opened:
+            continue
+        out.append((path, unseen(path)))
+    # Never-opened first, then by how much of the file is still unseen.
+    return sorted(out, key=lambda t: (t[1] is not None, -(t[1] or 0)))
+
+
+def _look_again(findings, work, repo, shown_diff):
+    """One resumed turn, aimed at the files this pass never opened.
+
+    Returns findings to ADD. Never loses a review: any failure, any unusable
+    reply, returns nothing extra and the pass's own findings stand.
+    """
+    if not os.environ.get("REVIEW_GAP_PASS"):
+        return []
+    # AN EXTRA LOOK MUST NEVER COST THE REVIEW IT IS ADDED TO. The arithmetic
+    # below reads a record maintained elsewhere, and when it raised, it raised
+    # OUTSIDE the try around the model call — so a bug in an optional extra
+    # would have been reported as "pr-review BROKEN". Everything here is
+    # inside the guard now, including working out what to ask.
+    try:
+        unread = _unread_changed(shown_diff)
+    except Exception as e:  # noqa: BLE001
+        print(f"  second look skipped ({type(e).__name__}: {str(e)[:90]})",
+              flush=True)
+        return []
+    if not unread:
+        return []
+    messages = (_CURRENT.get("stats") or {}).get("messages")
+    if not messages:
+        return []
+    # RESERVE THE REVISION'S SHARE BEFORE SPENDING. An extra look that leaves
+    # the revision on its floor has made the review worse, not better.
+    room = _remaining_budget() - REVISE_DEADLINE
+    if room < 60:
+        print("  second look skipped — not enough budget left to also revise",
+              flush=True)
+        return []
+    deadline = min(GAP_DEADLINE, room)
+    listed = "\n".join(
+        f"  · {p}" + (f" ({n:,} lines unread)" if n else "")
+        for p, n in unread[:MAX_GAP_PATHS])
+    if len(unread) > MAX_GAP_PATHS:
+        listed += f"\n  · …and {len(unread) - MAX_GAP_PATHS} more"
+    print(f"  {len(unread)} changed file(s) never opened — sending it back",
+          flush=True)
+    stats = {}
+    try:
+        reply, _ = agent.resume(
+            messages,
+            LOOK_AGAIN.format(n=len(unread), paths=listed, shape=ANSWER_SHAPE),
+            work, deadline=deadline,
+            stats=stats, answer_schema=ANSWER_SCHEMA, schema_reask=False)
+    except (Superseded, PRClosed):
+        raise
+    except Exception as e:  # noqa: BLE001 — an extra look must never lose one
+        print(f"  second look unavailable ({type(e).__name__}: {str(e)[:90]})",
+              flush=True)
+        _merge_opened(stats)
+        return []
+    _merge_opened(stats)
+    if stats.get("shortened"):
+        _CURRENT["answer_shortened"] = True
+    try:
+        extra = validate_findings(parse_findings(reply))
+    except ReviewError as e:
+        print(f"  second look unusable ({str(e)[:90]})", flush=True)
+        return []
+    # IT WAS SENT TO SPECIFIC FILES AND ITS ANSWER MUST COME FROM THEM. Without
+    # this the pass is a second "what else", which is the thing measured to
+    # plateau: a model asked to find more will restate a finding about a file
+    # it had already read rather than return nothing.
+    aimed = {p for p, _ in unread}
+    kept = [f for f in extra
+            if os.path.normpath(str(f.get("file", "") or ".")) in aimed]
+    if len(kept) < len(extra):
+        print(f"  {len(extra) - len(kept)} second-look finding(s) were not "
+              f"about the unread files — dropped", flush=True)
+    if kept:
+        print(f"  second look: {len(kept)} finding(s) the first pass missed "
+              f"({stats.get('tool_calls') or 0} tool call(s))", flush=True)
+    return kept
+
+
 def _revise(findings, work, repo):
     """One pass that can drop, correct and add — against the conversation that
     already read the code.
@@ -1947,7 +2111,8 @@ def _revise(findings, work, repo):
     try:
         reply, _ = agent.resume(
             messages, REVISE.format(findings=_listed(findings)), work,
-            deadline=min(300, max(60, _remaining_budget())), stats=stats,
+            deadline=min(REVISE_DEADLINE, max(60, _remaining_budget())),
+            stats=stats,
             answer_schema=REVISION_SCHEMA)
     except (Superseded, PRClosed):
         raise
@@ -3589,6 +3754,10 @@ def main():
                                        n, [str(diff)] + overflow),
                                    context=context, prior=prior)
             found = review_findings(prompt, work, repo)
+            # BEFORE the revision, so the revision judges the whole set — a
+            # finding the second look adds deserves the same scrutiny as one
+            # the pass made, and revising first would leave it unjudged.
+            found = found + _look_again(found, work, repo, shown)
             # ONE pass that drops, corrects and adds — against the conversation
             # that already read the code, so it costs a single call and no
             # traversal. PER PASS, because it resumes that pass's conversation:
