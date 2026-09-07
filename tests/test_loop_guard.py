@@ -171,7 +171,7 @@ class TestSamplingReachesTheWire:
         monkeypatch.setattr(llm.env, "get", lambda k: "key")
         llm.chat_with_tools([], [], sampling={"repetition_penalty": 1.1})
         assert sent["repetition_penalty"] == 1.1
-        assert sent["temperature"] == 0.2, "the review's own settings stay"
+        assert sent["temperature"] == llm.DEFAULT_TEMPERATURE, "the review's own settings stay"
 
 
 class TestACyclingReplyIsCutEarly:
