@@ -216,8 +216,12 @@ def run_ours(repo, pr, at=None):
         skipped_paths = list(skipped) if isinstance(skipped, list) else []
         context = review.build_context(repo, pr, meta, work, changed, diff,
                                        list(excluded or []) + skipped_paths)
-        prompt = review.PROMPT.format(
-            repo=repo, path=work, diff=diff, caveats=caveats, context=context,
+        # `build_prompt`, NOT `PROMPT.format` — see its docstring. Formatting
+        # the template here is how this harness drifted from `main` three
+        # times, most durably by never expanding hunks, which quietly measured
+        # a weaker reviewer than the one that runs in production (SCRUM-1314).
+        prompt, shown = review.build_prompt(
+            repo, work, diff, caveats=caveats, context=context,
             # NOT the real conversation. Every one of these PRs already carries
             # our own past reviews, and feeding them back would let the reviewer
             # score itself against its own answer sheet — the findings would
@@ -231,7 +235,7 @@ def run_ours(repo, pr, at=None):
         # fact a second baseline sample — 0 of 18 runs logged the pass. A
         # feature reachable only from `main` cannot be measured here, so
         # anything `main` does between the pass and the revision belongs here.
-        findings += review._look_again(findings, work, repo, diff)
+        findings += review._look_again(findings, work, repo, shown)
         findings, withdrawn = review._revise(findings, work, repo)
         findings += checks.run_all(work, changed, title=meta.get("title") or "",
                                    commits=review.commit_messages(repo, pr),
