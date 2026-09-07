@@ -62,6 +62,17 @@ FAILOVER_MODEL_MAP = {
 #: the model has not looked past.
 DEFAULT_REASONING_EFFORT = "none"
 
+#: MEASURED, AND IT DOES NOT MATTER. The model card recommends temperature
+#: 1.0, the reviewer has run at 0.2 since it began, and a low temperature is
+#: the textbook cause of repetition — replaying captured looping turns, 0.7
+#: went 8 for 8 without a cycle where 0.2 cycled 5 of 8. So it was run on
+#: the six-PR eval set, n=3 each, 2026-09-07: model findings 40 vs 40, cuts
+#: per run 3.7 vs 3.0, median wall 173s vs 190s, no failures either way.
+#: The narration the guard cuts is what this model does with reasoning off,
+#: at any temperature. Kept as a knob for the eval harness; do not re-propose
+#: a default change without a different measurement.
+DEFAULT_TEMPERATURE = float(os.environ.get("REVIEW_TEMPERATURE", "0.2"))
+
 
 #: What this review has spent, accumulated across every call in the process.
 #:
@@ -502,7 +513,8 @@ def _with_failover(payload, timeout, reasoning_effort, extract):
                               f"openrouter: {second}")
 
 
-def chat(messages, model=DEFAULT_MODEL, max_tokens=8192, temperature=0.2,
+def chat(messages, model=DEFAULT_MODEL, max_tokens=8192,
+         temperature=DEFAULT_TEMPERATURE,
          timeout=180, json_mode=False,
          reasoning_effort=DEFAULT_REASONING_EFFORT):
     """One stateless completion. Returns the assistant `content` string."""
@@ -528,7 +540,7 @@ def chat(messages, model=DEFAULT_MODEL, max_tokens=8192, temperature=0.2,
 
 
 def chat_with_tools(messages, tools, model=DEFAULT_MODEL, max_tokens=8192,
-                    temperature=0.2, timeout=180,
+                    temperature=DEFAULT_TEMPERATURE, timeout=180,
                     reasoning_effort=DEFAULT_REASONING_EFFORT,
                     tool_choice="auto", response_format=None, sampling=None):
     """One turn of a tool-using conversation. Returns the whole assistant MESSAGE.

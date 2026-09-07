@@ -201,6 +201,14 @@ outcome                2 findings,    2 findings
 A cut call is still billed — the tokens were generated — and the usage line
 says how many were estimated from their length.
 
+Temperature is not the lever. The model card recommends 1.0 and the reviewer
+runs at 0.2, which is the textbook cause of repetition, and on replayed
+looping turns 0.7 did go 8 for 8 without a cycle. On the six-PR eval set at
+n=3 it changed nothing: 40 model findings against 40, 3.0 cuts per run against
+3.7, a median 190s against 173s. The narration is what this model does with
+its reasoning off, at any temperature; `REVIEW_TEMPERATURE` stays a knob for
+the harness.
+
 ## What it produces, measured
 
 789 findings across 117 pull requests over nine days, in twelve repositories,
