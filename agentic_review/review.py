@@ -1164,7 +1164,8 @@ def _run_agent(prompt, cwd, timeout=AGENT_TIMEOUT, repo="", pr=""):
     try:
         text, _transcript = agent.run(
             REVIEWER_SYSTEM, prompt, cwd, deadline=timeout,
-            on_turn=between_turns, stats=stats)
+            on_turn=between_turns, stats=stats,
+            answer_schema=ANSWER_SCHEMA, schema_reask=False)
         # HOW MUCH LOOKING HAPPENED, kept where the verdict is decided. The
         # confirmation pass approves on the model's own account of what it
         # checked, and that account is worth exactly as much as the tool calls
@@ -1176,6 +1177,11 @@ def _run_agent(prompt, cwd, timeout=AGENT_TIMEOUT, repo="", pr=""):
         # record of it.
         _CURRENT["stats"] = dict(stats)
         _merge_opened(stats)
+        # STICKY across passes, like the opened set: a shortened answer in
+        # pass one is still a shortened review after pass two overwrites
+        # `stats`.
+        if stats.get("shortened"):
+            _CURRENT["answer_shortened"] = True
         return text.strip()
     except agent.Timeout as e:
         _print_transcript(e.transcript)
@@ -1752,6 +1758,58 @@ def _dedupe_key(f):
 #: judgement was discarded and eight findings were posted where four should have
 #: been. Reasoning in-band and a provider-enforced shape are not in tension;
 #: they were only in tension because the shape was a request.
+#: THE SHAPE A FORCED ANSWER IS HELD TO. Attached to the review and
+#: confirmation passes for the turns where the tools are switched off — the
+#: clock, the turn cap, the transcript budget, or a second cycle. Replayed on a
+#: captured forced turn from caeli-marketing#268 (2026-09-07), 4 samples each:
+#: without a schema the model narrated 8k-60k chars of prose or cycled, and
+#: produced usable JSON ONCE in 24 across six sampling settings; with this
+#: schema, 12 of 12 answered in 4-11s with 2-5 findings. Free answers are not
+#: re-asked against it (`schema_reask=False`): they parse as they are, and
+#: the re-ask would spend a call per pass to reformat what already parsed.
+#: `checked` is the confirmation pass's evidence list; the review pass may
+#: leave it out, and `_usable` still applies its own bar to both.
+ANSWER_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "review",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "wire_fields": {"type": "array", "items": {"type": "string"}},
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file": {"type": "string"},
+                            "line": {"type": "integer"},
+                            "severity": {"type": "string",
+                                         "enum": ["high", "medium", "low"]},
+                            "title": {"type": "string"},
+                            "detail": {"type": "string"},
+                            "fix": {"type": "string"},
+                            "fix_verified": {"type": "boolean"},
+                        },
+                        "required": ["file", "line", "severity", "title",
+                                     "detail"],
+                    },
+                },
+                "checked": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"file": {"type": "string"},
+                                       "verified": {"type": "string"}},
+                        "required": ["file", "verified"],
+                    },
+                },
+            },
+            "required": ["findings"],
+        },
+    },
+}
+
 REVISION_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
@@ -1904,6 +1962,10 @@ def _revise(findings, work, repo):
     # while reconsidering was still reported as never opened. Whether the reply
     # parsed has nothing to do with whether the file was read.
     _merge_opened(stats)
+    # A shortened revision cannot drop a finding (an incomplete list is
+    # refused wholesale) but it can lose an addition; the reader is told.
+    if stats.get("shortened"):
+        _CURRENT["answer_shortened"] = True
     if not reply:
         return findings, []
     try:
@@ -3037,6 +3099,12 @@ def render(findings, truncated, skipped, head_sha="", repo="", diff="",
                      "named above")
     if skipped:
         notes.append(f"{skipped} generated/binary files skipped")
+    if _CURRENT.get("answer_shortened"):
+        # The retry after a truncated answer tells the model to keep "the
+        # findings you are most confident in" — a licence to drop some. The
+        # reader is told, the way a partial review names its unread files.
+        notes.append("the model's answer overran its output budget once and "
+                     "was re-asked shorter, so this list may be incomplete")
     lines.append("")
     # NAME THE COMMIT THAT WAS ACTUALLY READ.
     #
@@ -3325,6 +3393,7 @@ def main():
     llm.reset_usage()
     _CURRENT["wire_fields"] = []
     _CURRENT["stats"] = {}
+    _CURRENT["answer_shortened"] = False
     _CURRENT["opened"] = set()
     _CURRENT["read_ranges"] = {}
     meta = json.loads(gh(f"/repos/{ORG}/{repo}/pulls/{pr}"))
