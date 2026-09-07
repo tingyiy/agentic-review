@@ -334,6 +334,27 @@ def compare(repo, pr, at_baseline=True):
     return result
 
 
+def _split(findings):
+    """(model, deterministic) — Copilot has no equivalent of the second.
+
+    THE TALLY WAS COMPARING UNLIKE THINGS. The CLAUDE.md-size nit fires on
+    every doc-touching PR and the ticket check on every untitled one, so
+    "ours 4, Copilot 2" could be two model findings and two checks no other
+    reviewer could ever produce. Counting them together flatters this tool on
+    exactly the PRs where it did the least model work (SCRUM-1241).
+
+    READ FROM THE FINDING, not guessed from its title. `checks` tags what it
+    produces at the point it produces it, so this cannot drift the way a list
+    of title prefixes here would — and a check added later is classified
+    without anyone remembering to update this file. (The corpus scorer in
+    `infra` parses POSTED bodies, where the tag is not visible, so it keeps its
+    own title matcher; that one is a reader of markdown, not of findings.)
+    """
+    det = [f for f in findings if f.get("kind") == "deterministic"]
+    model = [f for f in findings if f.get("kind") != "deterministic"]
+    return model, det
+
+
 def _summary(results):
     """Per-PR distribution, not a single number.
 
@@ -350,7 +371,7 @@ def _summary(results):
     print(f"{'PR':>16}  {'ours (each run)':>22} {'copilot':>8} {'hermes':>7}")
     for (repo, pr), runs in by_pr.items():
         good = [r for r in runs if "error" not in r]
-        counts = ", ".join(str(len(r["findings"])) for r in good) or "-"
+        counts = ", ".join(str(len(_split(r["findings"])[0])) for r in good) or "-"
         errs = len(runs) - len(good)
         first = good[0] if good else {}
         cop = ("n/a" if first.get("copilot_declined")
@@ -361,10 +382,16 @@ def _summary(results):
               f"{len(first.get('incumbent') or []):>7}{mark}{note}")
     rated = [r for r in ok if not r.get("copilot_declined")]
     if rated:
+        mine = sum(len(_split(r["findings"])[0]) for r in rated)
+        det = sum(len(_split(r["findings"])[1]) for r in rated)
         print(f"\nAcross {len(rated)} run(s) where Copilot actually ran: "
-              f"ours {sum(len(r['findings']) for r in rated)} finding(s) total, "
+              f"ours {mine} MODEL finding(s) total, "
               f"Copilot {sum(len(r['copilot']) for r in rated)} counted once per "
               f"PR.")
+        if det:
+            print(f"  (plus {det} deterministic check(s), counted separately — "
+                  f"Copilot has no equivalent, so including them would compare "
+                  f"unlike things.)")
     print("Counts are a heuristic split of prose, and one run is noise. "
           "Read the lists.")
 
