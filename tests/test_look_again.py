@@ -265,3 +265,48 @@ class TestTheRangeArithmeticSurvivesRealRecords:
         seen = _armed(monkeypatch, json.dumps({"findings": []}))
         assert clean._look_again([_finding("src/a.py")], ".", "r", DIFF) == []
         assert not seen, "it asked the model with a broken list"
+
+
+class TestItLeavesTheRevisionItsBudget:
+    """Both passes resume from the same pool and the optional one goes first.
+    An extra look that leaves the mandatory revision on its 60s floor — forced
+    on turn one with no tool calls — has made the review worse."""
+
+    def test_it_asks_for_less_than_the_revision_reserves(self, clean, monkeypatch):
+        monkeypatch.setattr(review, "_remaining_budget", lambda: 1000)
+        seen = _armed(monkeypatch, json.dumps({"findings": []}))
+        clean._look_again([], ".", "r", DIFF)
+        assert seen["kw"]["deadline"] == review.GAP_DEADLINE
+        assert review.GAP_DEADLINE < review.REVISE_DEADLINE
+
+    def test_a_tight_budget_shrinks_the_look_not_the_revision(self, clean, monkeypatch):
+        monkeypatch.setattr(review, "_remaining_budget",
+                            lambda: review.REVISE_DEADLINE + 90)
+        seen = _armed(monkeypatch, json.dumps({"findings": []}))
+        clean._look_again([], ".", "r", DIFF)
+        assert seen["kw"]["deadline"] == 90
+
+    def test_no_room_for_both_means_no_second_look(self, clean, monkeypatch):
+        monkeypatch.setattr(review, "_remaining_budget",
+                            lambda: review.REVISE_DEADLINE + 30)
+        seen = _armed(monkeypatch, json.dumps({"findings": []}))
+        assert clean._look_again([], ".", "r", DIFF) == []
+        assert not seen, "it spent the revision's budget"
+
+
+class TestOneSpellingOfAPath:
+    """`read_ranges` and `opened` are normalised; a diff header is raw. The
+    normalisation exists because `./src/big.py` once never matched
+    `src/big.py` — the same mismatch here reports a read file as unread and
+    then drops the finding it asked for."""
+
+    def test_a_dot_slash_diff_path_matches_a_normalised_record(self, clean):
+        diff = "--- a/./src/a.py\n+++ b/./src/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+        clean._CURRENT["opened"] = {"src/a.py"}
+        assert clean._unread_changed(diff) == []
+
+    def test_a_finding_is_kept_however_the_model_spells_the_path(self, clean, monkeypatch):
+        _armed(monkeypatch, json.dumps({"findings": [_finding("./src/b.py")]}))
+        got = clean._look_again([], ".", "r", DIFF)
+        assert [f["file"] for f in got] == ["./src/b.py"], (
+            "a legitimate finding was dropped on spelling alone")

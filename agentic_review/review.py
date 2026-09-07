@@ -1908,6 +1908,19 @@ ANSWER_SHAPE = """Reply with ONLY this JSON, no prose around it:
 "fix":"at most two lines: the direction, naming the helper/field/ordering",
 "fix_verified":true}]}"""
 
+#: WHAT THE REVISION MAY ASK FOR, named so the optional pass can reserve it.
+#: Both resume the conversation from the same `_remaining_budget()` pool and
+#: the second look goes first, so without a reservation a long second look
+#: drives the revision to its 60s floor — which is the forced-on-turn-one,
+#: zero-tool-calls failure `RESUME_HEADROOM` exists to prevent, except now
+#: caused by an OPTIONAL pass degrading a mandatory one.
+REVISE_DEADLINE = 300
+
+#: And what the second look may ask for: less, because it is the optional
+#: one. It reads a handful of files it has already been pointed at, which is
+#: a smaller job than reconsidering every finding.
+GAP_DEADLINE = 120
+
 #: How many unread paths to name. The list is a pointer, not a work order —
 #: past a dozen the pass has bigger problems (that is the partial-review
 #: caveat's territory) and a long list crowds the conversation it resumes.
@@ -1959,8 +1972,13 @@ def _unread_changed(shown_diff):
             covered.update(range(lo, (total if hi is None else hi) + 1))
         return max(0, total - len(covered))
 
+    # ONE SPELLING ON BOTH SIDES. `read_ranges` and `opened` are keyed by
+    # `os.path.normpath` (that normalisation exists because `./src/big.py`
+    # once never matched `src/big.py`), while a diff header is raw. Comparing
+    # the two spellings reports a read file as unread, and then drops the
+    # finding it asked for.
     out = []
-    for path in sorted(_diff_paths(shown_diff)):
+    for path in sorted(os.path.normpath(p) for p in _diff_paths(shown_diff)):
         if path in opened:
             continue
         out.append((path, unseen(path)))
@@ -1992,6 +2010,14 @@ def _look_again(findings, work, repo, shown_diff):
     messages = (_CURRENT.get("stats") or {}).get("messages")
     if not messages:
         return []
+    # RESERVE THE REVISION'S SHARE BEFORE SPENDING. An extra look that leaves
+    # the revision on its floor has made the review worse, not better.
+    room = _remaining_budget() - REVISE_DEADLINE
+    if room < 60:
+        print("  second look skipped — not enough budget left to also revise",
+              flush=True)
+        return []
+    deadline = min(GAP_DEADLINE, room)
     listed = "\n".join(
         f"  · {p}" + (f" ({n:,} lines unread)" if n else "")
         for p, n in unread[:MAX_GAP_PATHS])
@@ -2004,7 +2030,7 @@ def _look_again(findings, work, repo, shown_diff):
         reply, _ = agent.resume(
             messages,
             LOOK_AGAIN.format(n=len(unread), paths=listed, shape=ANSWER_SHAPE),
-            work, deadline=min(300, max(60, _remaining_budget())),
+            work, deadline=deadline,
             stats=stats, answer_schema=ANSWER_SCHEMA, schema_reask=False)
     except (Superseded, PRClosed):
         raise
@@ -2026,7 +2052,8 @@ def _look_again(findings, work, repo, shown_diff):
     # plateau: a model asked to find more will restate a finding about a file
     # it had already read rather than return nothing.
     aimed = {p for p, _ in unread}
-    kept = [f for f in extra if str(f.get("file", "")) in aimed]
+    kept = [f for f in extra
+            if os.path.normpath(str(f.get("file", "") or ".")) in aimed]
     if len(kept) < len(extra):
         print(f"  {len(extra) - len(kept)} second-look finding(s) were not "
               f"about the unread files — dropped", flush=True)
@@ -2084,7 +2111,8 @@ def _revise(findings, work, repo):
     try:
         reply, _ = agent.resume(
             messages, REVISE.format(findings=_listed(findings)), work,
-            deadline=min(300, max(60, _remaining_budget())), stats=stats,
+            deadline=min(REVISE_DEADLINE, max(60, _remaining_budget())),
+            stats=stats,
             answer_schema=REVISION_SCHEMA)
     except (Superseded, PRClosed):
         raise
