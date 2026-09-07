@@ -468,3 +468,42 @@ class TestNarrationIsCutAtTheProseCap:
         monkeypatch.setattr(agent_runner.llm, "chat_with_tools", flaky)
         _, transcript = agent_runner.run("sys", "user", str(repo), log=None)
         assert any("narrated" in line and "no tool call" in line for line in transcript)
+
+
+class TestReviewRoundOne:
+    """agentic-review#18, review at d5d2ab7 — three of its four questions."""
+
+    def test_the_prose_cap_yields_to_a_tool_call_in_progress(self, monkeypatch):
+        """A turn that has started a tool call is doing its job, however much
+        it said first; the cut is for turns that never get there."""
+        text = TestNarrationIsCutAtTheProseCap()._prose(200)
+        call = {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "type": "function",
+             "function": {"name": "grep", "arguments": "{}"}}]},
+            "finish_reason": None}]}
+        chunks = [call] + [_content(text[i:i + 100]) for i in range(0, len(text), 100)]
+        _serve(_Stream(_sse(chunks)), monkeypatch)
+        choice = llm._post("https://x", "k", {"messages": [], "tools": [{}]}, 5, "fw", "m")
+        assert choice["message"]["tool_calls"][0]["function"]["name"] == "grep"
+        assert len(choice["message"]["content"]) == len(text)
+
+    def test_the_estimate_counts_the_whole_request(self):
+        msgs = [{"role": "user", "content": "x" * 3500}]
+        bare = llm._estimate_tokens({"messages": msgs})
+        with_tools = llm._estimate_tokens({"messages": msgs, "tools": [{"d": "y" * 3500}],
+                                           "stream": True, "stream_options": {}})
+        assert with_tools >= bare + 900, "the tool schemas are part of the prompt"
+
+    def test_a_shortened_revision_marks_the_review(self, monkeypatch):
+        monkeypatch.setitem(review._CURRENT, "stats", {"messages": [{"role": "user"}]})
+        monkeypatch.setitem(review._CURRENT, "answer_shortened", False)
+
+        def resume(messages, question, root, **kw):
+            kw["stats"].update(tool_calls=1, turns=1, shortened=True)
+            return json.dumps({"revisions": [{"index": 0, "action": "keep", "why": "ok"}]}), []
+
+        monkeypatch.setattr(review.agent, "resume", resume)
+        finding = {"file": "f.py", "line": 1, "severity": "high", "title": "t", "detail": "d"}
+        kept, withdrawn = review._revise([finding], ".", "r")
+        assert kept and not withdrawn
+        assert review._CURRENT["answer_shortened"] is True

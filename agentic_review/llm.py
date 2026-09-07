@@ -270,8 +270,8 @@ def _read_stream(r, provider, model, on_content=None):
 
     The message carries `content`, `reasoning_content` (when the provider sent
     any) and `tool_calls` assembled by index from their argument fragments.
-    `on_content(text_so_far)` is called as content grows and may raise to stop
-    the read — that is the loop guard's hook.
+    `on_content(total, parts, tool_call_seen)` is called as content grows and
+    may raise to stop the read — that is the loop guard's hook.
     """
     content, reasoning = [], []
     calls = {}
@@ -299,7 +299,7 @@ def _read_stream(r, provider, model, on_content=None):
                 content.append(delta["content"])
                 total += len(delta["content"])
                 if on_content is not None:
-                    on_content(total, content)
+                    on_content(total, content, bool(calls))
             if delta.get("reasoning_content"):
                 reasoning.append(delta["reasoning_content"])
             for tc in delta.get("tool_calls") or []:
@@ -337,7 +337,7 @@ def _post(url, key, payload, timeout, provider, model):
 
     agent_turn = bool(payload.get("tools"))
 
-    def guard(total, parts):
+    def guard(total, parts, tool_call_seen=False):
         if total < LOOP_MIN_CHARS or total - mark[0] < LOOP_CHECK_EVERY:
             return
         mark[0] = total
@@ -347,7 +347,12 @@ def _post(url, key, payload, timeout, provider, model):
             raise Looping(provider, model, total, seen,
                           time.monotonic() - started, tail=parts[0])
         # Only an AGENT turn: a plain `chat` is asked for prose sometimes.
-        if agent_turn and total >= PROSE_CAP and narrating(parts[0]):
+        # And not once a tool call has started arriving — that turn is doing
+        # its job, however much it said first. (A call that would have come
+        # AFTER the cap cannot be known about; the cap sits above every free
+        # answer seen, and the retry is cheap.)
+        if (agent_turn and not tool_call_seen and total >= PROSE_CAP
+                and narrating(parts[0])):
             raise Looping(provider, model, total, 0,
                           time.monotonic() - started, tail=parts[0])
 
@@ -421,10 +426,13 @@ def _post(url, key, payload, timeout, provider, model):
 
 
 def _estimate_tokens(payload):
-    """Prompt size when the provider never said: the request's text at the
-    ~3.5 chars/token these transcripts measure at. Only used on a cut stream."""
+    """Prompt size when the provider never said: the whole request — messages,
+    tool schemas, response format — at the ~3.5 chars/token these transcripts
+    measure at. Only used on a cut stream."""
     try:
-        return int(len(json.dumps(payload.get("messages", []))) / 3.5)
+        sent = {k: v for k, v in payload.items()
+                if k not in ("stream", "stream_options")}
+        return int(len(json.dumps(sent)) / 3.5)
     except (TypeError, ValueError):
         return 0
 

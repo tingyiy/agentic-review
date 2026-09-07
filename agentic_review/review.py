@@ -1962,6 +1962,10 @@ def _revise(findings, work, repo):
     # while reconsidering was still reported as never opened. Whether the reply
     # parsed has nothing to do with whether the file was read.
     _merge_opened(stats)
+    # A shortened revision cannot drop a finding (an incomplete list is
+    # refused wholesale) but it can lose an addition; the reader is told.
+    if stats.get("shortened"):
+        _CURRENT["answer_shortened"] = True
     if not reply:
         return findings, []
     try:
