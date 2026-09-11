@@ -5,6 +5,7 @@ review — is the one piece of this tool a new adopter must get right before
 anything else works, and burying it in a 2,000-line module hides it.
 """
 import http.client
+import io
 import json
 import os
 import time
@@ -89,6 +90,37 @@ def _send(req, attempts=2, timeout=60):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read().decode()
+        except urllib.error.HTTPError as e:
+            # A 4xx NAMES ITS REQUEST, or it names nothing. `str(HTTPError)` is
+            # "HTTP Error 422: Unprocessable Entity" — no method, no path, and
+            # the response body, which is the ONLY place GitHub says which
+            # field it rejected, is never read. browser-extension#386 on
+            # 2026-09-11 crashed with exactly that line, and the run log could
+            # not say which of a dozen calls had failed. The dropped-connection
+            # branch below has named its request since the day it was written;
+            # this one did not, which is the fix-the-instance-miss-the-sibling
+            # failure this repository's CLAUDE.md calls its most common finding.
+            #
+            # THE TYPE AND THE BODY BOTH SURVIVE, deliberately. Callers reason
+            # about these — `_post_review` reads a 422's body to tell a refused
+            # verdict from any other rejection, and `_follow_redirect` switches
+            # on `.code` — so this enriches the message in place rather than
+            # wrapping it in a `ReviewError`. `addbase.__init__` BINDS `read`
+            # to the original stream, so putting the body back means rebinding
+            # the method too; setting `.fp` alone leaves every later reader an
+            # empty string, which would make every 422 look like an unknown one.
+            body = b""
+            try:
+                body = e.read()
+            except Exception:  # noqa: BLE001 — context is best-effort
+                pass
+            replay = io.BytesIO(body)
+            e.fp, e.read = replay, replay.read
+            # `.reason` is a read-only property over `.msg`, and `__str__`
+            # renders `.reason`.
+            e.msg = (f"{e.msg} on {req.get_method()} {req.selector}"
+                     + (f" — {body.decode('utf-8', 'replace')[:300]}" if body else ""))
+            raise
         except _DROPPED as e:
             if attempt + 1 >= attempts:
                 raise ReviewError(
