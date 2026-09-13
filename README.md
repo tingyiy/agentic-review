@@ -111,7 +111,7 @@ default:
 | variable | default | what it does |
 |---|---|---|
 | `REVIEW_ORG` | from `GITHUB_REPOSITORY` | repository owner |
-| `REVIEW_MODEL` | `deepseek-v4-flash` | any OpenAI-shaped model |
+| `REVIEW_MODEL` | `deepseek-v4p1-flash` | any OpenAI-shaped model |
 | `REVIEW_TICKET_PATTERN` | `[A-Z][A-Z0-9]+-\d+` | empty disables the title check |
 | `REVIEW_JIRA_SITE` | *(unset)* | empty disables ticket context |
 | `REVIEW_CONVENTION_DOCS` | `CLAUDE.md,AGENTS.md,CONTRIBUTING.md,README.md` | what counts as the rules |
@@ -137,7 +137,8 @@ a log line. This repository reviews itself that way
 
 ## Reasoning is off, and that is measured
 
-`deepseek-v4-flash` is a reasoning model whose thinking shares the `max_tokens`
+`deepseek-v4p1-flash` (like the `-0731` generation it replaced, on which the numbers
+below were measured) is a reasoning model whose thinking shares the `max_tokens`
 budget, so the budget is a **cliff, not a cap**. On a real 30k-char diff:
 
 ```

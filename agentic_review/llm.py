@@ -32,17 +32,26 @@ from .errors import ReviewError
 FIREWORKS_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+#: SCRUM-1376: was deepseek-v4-flash-0731 until Fireworks removed it from
+#: serverless on 2026-09-25. The move was FORCED, so the question this time was
+#: not "is there something better" (that was 2026-08-30, which kept deepseek)
+#: but "did anything regress". Re-checked the constraint that disqualified
+#: GLM-5.3-Flash before swapping: the replacement accepts
+#: `reasoning_effort: "none"` and returns 0 reasoning chars, same 1M context.
 DEFAULT_MODEL = os.environ.get(
-    "REVIEW_MODEL", "accounts/fireworks/models/deepseek-v4-flash-0731")
+    "REVIEW_MODEL", "accounts/fireworks/models/deepseek-v4p1-flash")
 
 #: The same model on a second provider, used ONLY when the first one is the
 #: broken party. Fireworks served 503 "service overloaded" on 13 of 15 probes on
 #: 2026-08-11; three retries two seconds apart against a sustained overload is
 #: not a recovery strategy, it is the same failure three times.
+#: The two providers spell this model DIFFERENTLY and each 400s/404s on the
+#: other's form — Fireworks `deepseek-v4p1-flash`, OpenRouter
+#: `deepseek/deepseek-v4.1-flash`. A find-and-replace leaves a working primary
+#: and a dead failover, which breaks only once Fireworks is already down.
 FAILOVER_MODEL_MAP = {
-    "accounts/fireworks/models/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731",
+    "accounts/fireworks/models/deepseek-v4p1-flash": "deepseek/deepseek-v4.1-flash",
     "accounts/fireworks/models/minimax-m3": "minimax/minimax-m3",
-    "accounts/fireworks/models/glm-5p2": "z-ai/glm-5.2",
 }
 
 #: LOAD-BEARING, and the reason a model swap is not a one-line change.
