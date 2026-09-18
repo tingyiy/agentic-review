@@ -74,9 +74,9 @@ class TestTheLineTargetIsSeparate:
     check calls the second fine. Neither is."""
 
     def test_a_long_file_well_under_the_byte_cap_still_fires(self, pr, tmp_path):
-        w = _repo(tmp_path, "x\n" * 300)          # 600 bytes, 301 lines
+        w = _repo(tmp_path, "x\n" * 300)          # 600 bytes, 300 lines
         f, = pr.checks.claude_md_size(w, pr._diff_paths(TOUCHES_MD))
-        assert "301 lines over 200" in f["title"]
+        assert "300 lines over 200" in f["title"]
         assert "bytes over" not in f["title"], "it is not over the byte cap"
 
     def test_a_huge_file_on_few_lines_still_fires_on_bytes(self, pr, tmp_path):
@@ -91,8 +91,32 @@ class TestTheLineTargetIsSeparate:
         assert "bytes over" in f["title"] and "lines over" in f["title"]
 
     def test_exactly_200_lines_is_fine(self, pr, tmp_path):
-        w = _repo(tmp_path, "x\n" * 199)          # 200 lines
+        """AND IT IS 200 LINES, not 199. This test used to build `"x\\n" * 199`
+        and call it 200, which is how the off-by-one below survived: the
+        boundary case was asserted one line short of the boundary."""
+        w = _repo(tmp_path, "x\n" * 200)          # 200 lines, newline-terminated
         assert pr.checks.claude_md_size(w, pr._diff_paths(TOUCHES_MD)) == []
+
+    def test_a_trailing_newline_does_not_add_a_line(self, pr, tmp_path):
+        """EVERY CLAUDE.md IN THE WORKSPACE ENDS IN ONE, so `count("\\n") + 1`
+        put all of them a line over what `wc -l` says. caeli-marketing sat at
+        exactly 200 and was told it was at 201 on every PR that touched it,
+        eight times, while infra/cron's docs-sync — enforcing the SAME cap,
+        counting `count("\\n")` — had just judged the file compliant. The
+        author who checked was right and this check was wrong."""
+        at_cap = _repo(tmp_path / "at", "x\n" * 200)
+        assert pr.checks.claude_md_size(at_cap, pr._diff_paths(TOUCHES_MD)) == []
+        over, = pr.checks.claude_md_size(_repo(tmp_path / "over", "x\n" * 201),
+                                         pr._diff_paths(TOUCHES_MD))
+        assert "201 lines over 200" in over["title"]
+
+    def test_an_unterminated_last_line_still_counts(self, pr, tmp_path):
+        """The correction is not "subtract one". A file whose last line has no
+        newline has that many lines, and dropping it would let 201 lines pass
+        by deleting one byte."""
+        w = _repo(tmp_path, "x\n" * 200 + "x")    # 201 lines, unterminated
+        f, = pr.checks.claude_md_size(w, pr._diff_paths(TOUCHES_MD))
+        assert "201 lines over 200" in f["title"]
 
 
 class TestItStaysQuiet:
