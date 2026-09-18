@@ -52,7 +52,16 @@ def claude_md_size(work, changed_paths):
         except OSError:
             continue  # deleted in this PR, or unreadable — not a size problem
         size = len(body)
-        lines = body.count(b"\n") + 1
+        # A TRAILING NEWLINE TERMINATES THE LAST LINE; it does not start
+        # another. `count("\n") + 1` read one line more than `wc -l` on
+        # every file in the workspace — they all end in one — so a
+        # CLAUDE.md at exactly the target was reported over it. The cost
+        # was not the digit: docs-sync (infra/cron) enforces the SAME cap
+        # counting `count("\n")`, so a file it had just judged compliant
+        # was told here that it was not, on every PR, for weeks — and the
+        # author who checked was right and this check was wrong. Two
+        # systems measuring one rule have to measure it identically.
+        lines = body.count(b"\n") + (1 if body and not body.endswith(b"\n") else 0)
         cap, source = CLAUDE_MD_MAX, "claudelint's 40k default"
         m = _SELF_CAP.search(body[:2000].decode("utf-8", "replace"))
         if m and int(m.group(1)) * 1000 < CLAUDE_MD_MAX:
