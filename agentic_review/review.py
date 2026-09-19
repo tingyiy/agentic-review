@@ -514,7 +514,13 @@ CONVERSATION_BUDGET = int(os.environ.get("REVIEW_CONVERSATION_BUDGET", 250_000))
 #: BOTH NUMBERS MOVE TOGETHER OR NEITHER DOES. The budget fills newest-first, so
 #: raising these alone would spend it on our own verbose reviews and push the
 #: author's replies out — the exact opposite of the point.
-ITEM_CAPS = {"review": 8_000, "inline": 3_000, "comment": 3_000, "commit": 4_000}
+#: READ FROM THE ENVIRONMENT, like `CONVERSATION_BUDGET` above and
+#: `MAX_TRANSCRIPT_CHARS` in the agent. An operator meeting a pathological item
+#: on their own runner could raise the budget and not the cap that was doing the
+#: cutting, which is the one knob that would have helped.
+ITEM_CAPS = {kind: int(os.environ.get(f"REVIEW_ITEM_CAP_{kind.upper()}", default))
+             for kind, default in (("review", 8_000), ("inline", 3_000),
+                                   ("comment", 3_000), ("commit", 4_000))}
 
 
 def _capped_item(body, cap):
@@ -529,7 +535,26 @@ def _capped_item(body, cap):
     """
     if len(body) <= cap:
         return body
-    return body[:cap] + f"\n[… cut here: {len(body) - cap:,} more characters]"
+    # THE MARKER COUNTS AGAINST THE CAP. Appending it after the cut made
+    # `ITEM_CAPS["review"] = 8_000` produce an 8,045-character item — honest in
+    # the budget, which charges `len(text)`, but a constant that does not mean
+    # what its name says. Room is reserved for it instead.
+    #
+    # Two passes, because the reserved room changes the remainder and the
+    # remainder can gain a digit. It converges immediately; the loop is the
+    # proof, not an expectation of many rounds.
+    keep = cap
+    for _ in range(4):
+        marker = f"\n[… cut here: {len(body) - keep:,} more characters]"
+        if keep + len(marker) <= cap:
+            break
+        keep = cap - len(marker)
+        if keep <= 0:
+            # A cap too small to hold the marker AND any text. Saying "cut" and
+            # showing nothing of what was cut is worse than the silent cut this
+            # marker exists to replace, so the body wins the space.
+            return body[:cap]
+    return body[:keep] + marker
 
 
 def conversation(repo, pr):

@@ -19,6 +19,7 @@ whole-body `json.loads` (right for a json_mode completion) died 489 chars into
 the first real run.
 """
 import json
+import re
 
 import pytest
 from agentic_review.errors import ReviewError as ScanError
@@ -347,8 +348,8 @@ class TestConversation:
                                                "2026-08-22T10:00:00Z")],
         })
         out = prr.conversation("infra", 94)
-        assert "x" * cap in out
-        assert "x" * (cap + 1) not in out
+        assert "x" * (cap + 1) not in out, "the body must be cut"
+        assert "x" * 100 in out, "and something of it must survive"
 
     def test_a_cut_item_says_it_was_cut(self, prr, monkeypatch):
         """A silent cut hands the model half a sentence as a whole thought.
@@ -359,13 +360,24 @@ class TestConversation:
         more times.
         """
         cap = prr.ITEM_CAPS["comment"]
+        body = "y" * (cap + 250)
         self._stub(prr, monkeypatch, {
-            "/issues/94/comments": [{"body": "y" * (cap + 250),
-                                     "user": {"login": "a"},
+            "/issues/94/comments": [{"body": body, "user": {"login": "a"},
                                      "created_at": "2026-08-22T10:00:00Z"}],
         })
         out = prr.conversation("infra", 94)
-        assert "cut here: 250 more characters" in out
+        # THE COUNT MUST ACCOUNT FOR EXACTLY WHAT WAS DROPPED — asserted as an
+        # invariant against the original body, not restated from the formula,
+        # which would go green on a broken one.
+        m = re.search(r"cut here: ([\d,]+) more characters", out)
+        assert m, out[-200:]
+        dropped = int(m.group(1).replace(",", ""))
+        # The CONTIGUOUS run, not `out.count("y")` — the instruction header
+        # around the block contains the letter ("do not repeat yourself"), and
+        # counting those made the invariant look violated by 5 when it held.
+        kept = len(re.search(r"y{10,}", out).group(0))
+        assert kept + dropped == len(body), (
+            f"marker says {dropped} dropped, but {kept} of {len(body)} survived")
 
     def test_an_item_that_fits_is_not_marked(self, prr, monkeypatch):
         """The marker must mean something. Stamped on every item it is noise,
@@ -414,12 +426,58 @@ class TestConversation:
             assert prr.ITEM_CAPS[kind] > seen, (
                 f"{kind} cap {prr.ITEM_CAPS[kind]} is under the measured p90 {seen}")
 
-    def test_the_budget_is_larger_than_a_long_prs_conversation(self, prr):
-        """Both numbers move together or neither does. The budget fills
-        newest-first, so caps raised alone would spend it on our own verbose
-        reviews and push the author's replies out — the opposite of the point.
-        caeli-marketing#391, 19 rounds, carries ~165,000 characters."""
-        assert prr.CONVERSATION_BUDGET >= 165_000
+    def test_the_budget_holds_a_long_prs_conversation_at_these_caps(self, prr):
+        """Both numbers move together or neither does.
+
+        THE ASSERTION HAS TO READ BOTH, or it is not that guard. This asserted
+        `CONVERSATION_BUDGET >= 165_000` while its docstring promised a
+        relationship — so raising every cap to 100,000, which would let four
+        items eat the whole budget and drop every older reply, left it green.
+        Found by the reviewer on the PR that wrote it.
+
+        A round is one review plus one author reply. 19 of them is the longest
+        real PR measured; the budget must hold that many at the CURRENT caps,
+        so raising a cap without the budget fails here.
+        """
+        rounds = 19
+        need = (prr.ITEM_CAPS["review"] + prr.ITEM_CAPS["comment"]) * rounds
+        assert prr.CONVERSATION_BUDGET >= need, (
+            f"{rounds} rounds at these caps needs {need:,} chars but the budget "
+            f"is {prr.CONVERSATION_BUDGET:,} — raise it, or lower the caps")
+
+    def test_a_cut_item_stays_within_its_cap(self, prr):
+        """The marker counts against the cap.
+
+        Appended after the cut it made an 8,000 cap yield an 8,045-character
+        item — honest in the budget, which charges `len(text)`, but a constant
+        that does not mean what its name says. `test_a_long_commit_message_is_capped`
+        passes either way, so nothing pinned the boundary until this.
+        """
+        for kind, cap in prr.ITEM_CAPS.items():
+            for over in (1, 5, 1_000, 999_999):
+                out = prr._capped_item("x" * (cap + over), cap)
+                assert len(out) <= cap, (
+                    f"{kind}: cap {cap} produced {len(out)} chars")
+
+    def test_a_cap_too_small_for_the_marker_drops_the_marker(self, prr):
+        """Saying "cut" and showing nothing of what was cut is worse than the
+        silent cut the marker exists to replace, so the body wins the space."""
+        out = prr._capped_item("x" * 500, 10)
+        assert out == "x" * 10
+        assert "cut here" not in out
+
+    def test_the_caps_are_settable_from_the_environment(self, prr, monkeypatch):
+        """Every other budget here is — `REVIEW_CONVERSATION_BUDGET`,
+        `REVIEW_MAX_TRANSCRIPT`. An operator meeting a pathological item could
+        raise the budget and not the cap that was doing the cutting."""
+        import importlib
+        monkeypatch.setenv("REVIEW_ITEM_CAP_REVIEW", "12345")
+        reloaded = importlib.reload(prr)
+        try:
+            assert reloaded.ITEM_CAPS["review"] == 12345
+        finally:
+            monkeypatch.delenv("REVIEW_ITEM_CAP_REVIEW")
+            importlib.reload(prr)
 
     def test_one_endpoint_failing_keeps_the_others(self, prr, monkeypatch):
         """Losing the whole conversation is what makes the tool repeat itself, so
