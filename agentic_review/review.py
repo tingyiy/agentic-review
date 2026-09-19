@@ -487,6 +487,17 @@ CONVERSATION_BUDGET = int(os.environ.get("REVIEW_CONVERSATION_BUDGET", 250_000))
 #:     review     60     4,167  7,137  10,706         83%             27%
 #:     comment    63     1,100  1,817   2,317         70%             64%
 #:     commit     77       507  1,643   3,992         10%             89%
+#:     inline     87       340    460     614          0%            100%
+#:
+#: INLINE WAS NEVER THE PROBLEM, and it is the one number here not chosen from
+#: a breach. 87 inline replies across 185 pull requests in nine repositories:
+#: the longest was 614 characters and the OLD 800 cap already showed all of
+#: them. It is raised anyway, to 3,000, for the same reason as the rest — these
+#: are a guard against a pathological item, not a budget, and 87 samples do not
+#: prove the next one is short. That is headroom, not a measurement, and saying
+#: so is the point of this paragraph. (Asked for by the reviewer on the PR that
+#: set it: the guard test below could not fail for the one kind whose value had
+#: nothing behind it.)
 #:
 #: The reviewer was shown 27% OF WHAT IT HAD ITSELF SAID. That is the mechanism
 #: behind "it re-raises a point I already answered": not that it ignores the

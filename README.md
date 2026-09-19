@@ -67,7 +67,13 @@ kind        n   median    p90     max   truncated   of text SHOWN
 review     60    4,167  7,137  10,706         83%             27%
 comment    63    1,100  1,817   2,317         70%             64%
 commit     77      507  1,643   3,992         10%             89%
+inline     87      340    460     614          0%            100%
 ```
+
+Inline replies are the exception and are reported for honesty: 87 of them
+across 185 pull requests, the longest 614 characters, all of which the old cap
+already showed. Theirs is raised with the rest as headroom, not because
+anything was being lost.
 
 **The reviewer was shown 27% of what it had itself said.** That is the mechanism
 behind "it re-raises a point I already answered" — not that it ignores the

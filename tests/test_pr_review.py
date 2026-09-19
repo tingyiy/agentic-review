@@ -405,7 +405,11 @@ class TestConversation:
         """Set past p90 so the BUDGET limits and these do not. If a cap ever
         drops back under the real distribution it silently becomes the
         constraint again, which is the whole bug."""
-        p90 = {"review": 7_137, "comment": 1_817, "commit": 1_643}
+        p90 = {"review": 7_137, "comment": 1_817, "commit": 1_643, "inline": 460}
+        assert set(p90) == set(prr.ITEM_CAPS), (
+            "every cap needs a measurement behind it — a kind missing from this "
+            "dict is a kind this guard silently cannot protect, which is how "
+            "`inline` shipped at 3,000 with nothing behind it")
         for kind, seen in p90.items():
             assert prr.ITEM_CAPS[kind] > seen, (
                 f"{kind} cap {prr.ITEM_CAPS[kind]} is under the measured p90 {seen}")
