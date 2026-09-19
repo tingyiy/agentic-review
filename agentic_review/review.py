@@ -471,7 +471,54 @@ Reply with ONLY this JSON, no prose around it:
 #: How much prior conversation the reviewer is shown. Generous on purpose: the
 #: cost of forgetting is a reviewer that argues with its own earlier advice,
 #: which is worse than any token bill and is what a 12-item cap actually bought.
-CONVERSATION_BUDGET = int(os.environ.get("REVIEW_CONVERSATION_BUDGET", 120_000))
+CONVERSATION_BUDGET = int(os.environ.get("REVIEW_CONVERSATION_BUDGET", 250_000))
+
+#: How much of ONE item is shown, by kind. These are a guard against a
+#: pathological reply — the 62,451-character looping one is on record — and NOT
+#: a budget. The budget is above, and it is the thing that should bind.
+#:
+#: IT DID NOT. When the 12-ITEM cap became a 120,000-CHARACTER budget, these
+#: were left at the values that made sense while only twelve items got through,
+#: and the constraint silently moved from "how many items" to "how much of each
+#: item". MEASURED over 24 closed pull requests in four repositories, against
+#: the old caps of 1,200 / 800 / 800 / 1,500:
+#:
+#:     kind        n   median    p90     max   truncated   of text SHOWN
+#:     review     60     4,167  7,137  10,706         83%             27%
+#:     comment    63     1,100  1,817   2,317         70%             64%
+#:     commit     77       507  1,643   3,992         10%             89%
+#:
+#: The reviewer was shown 27% OF WHAT IT HAD ITSELF SAID. That is the mechanism
+#: behind "it re-raises a point I already answered": not that it ignores the
+#: reply, but that it reads four endpoints and then throws most of them away. On
+#: caeli-marketing#391 all 21 author rebuttals were over the comment cap; the cut
+#: on the one disputing a finding landed mid-sentence, just before the paragraph
+#: naming the mechanism, and the point came back three more times.
+#:
+#: Set past p90 so the budget limits and these do not. A 3-5 round PR carries
+#: ~27,000 characters and never reaches either number; a 19-round one carries
+#: ~165,000 and fits. The cost lands only on long contested PRs, which is where
+#: the failure was.
+#:
+#: BOTH NUMBERS MOVE TOGETHER OR NEITHER DOES. The budget fills newest-first, so
+#: raising these alone would spend it on our own verbose reviews and push the
+#: author's replies out — the exact opposite of the point.
+ITEM_CAPS = {"review": 8_000, "inline": 3_000, "comment": 3_000, "commit": 4_000}
+
+
+def _capped_item(body, cap):
+    """Cut an over-long conversation item, and SAY SO where it was cut.
+
+    A silent cut hands the model half a sentence as if it were a whole thought.
+    These caps are now a guard against a pathological reply rather than a
+    budget, so one firing is unusual and the model should know it happened —
+    the same reason the block below says when the history itself is incomplete.
+    Half a rebuttal read as a complete one is exactly how an answered point
+    comes back.
+    """
+    if len(body) <= cap:
+        return body
+    return body[:cap] + f"\n[… cut here: {len(body) - cap:,} more characters]"
 
 
 def conversation(repo, pr):
@@ -504,10 +551,10 @@ def conversation(repo, pr):
         # PAGED, not merely `per_page=100`: these return OLDEST first, so on a
         # contested PR the rebuttal this block exists to show is on the LAST
         # page. Raising 30 to 100 moved that cliff rather than removing it.
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/reviews", "review", 1200),
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/comments", "inline", 800),
-        (f"/repos/{ORG}/{repo}/issues/{pr}/comments", "comment", 800),
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/commits", "commit", 1500),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/reviews", "review", ITEM_CAPS["review"]),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/comments", "inline", ITEM_CAPS["inline"]),
+        (f"/repos/{ORG}/{repo}/issues/{pr}/comments", "comment", ITEM_CAPS["comment"]),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/commits", "commit", ITEM_CAPS["commit"]),
     ):
         try:
             page = _paged(path)
@@ -531,7 +578,7 @@ def conversation(repo, pr):
                            or (c.get("author") or {}).get("login") or "?")
                     when = (detail.get("author") or {}).get("date") or ""
                     if body:
-                        items.append((when, f"[{who} — commit]\n{body[:cap]}"))
+                        items.append((when, f"[{who} — commit]\n{_capped_item(body, cap)}"))
                     continue
                 body = (c.get("body") or "").strip()
                 if not body:
@@ -550,7 +597,7 @@ def conversation(repo, pr):
                 # The comment endpoints carry no `submitted_at`, so the chain
                 # is safe for them.
                 items.append((c.get("submitted_at") or c.get("created_at") or "",
-                              f"[{who} — {tag}{where}]\n{body[:cap]}"))
+                              f"[{who} — {tag}{where}]\n{_capped_item(body, cap)}"))
         except Exception as e:
             # One endpoint failing must not discard the other two — losing the
             # whole conversation is what makes the tool repeat itself.

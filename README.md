@@ -58,6 +58,31 @@ reviews, its inline replies, its issue comments, and — the one everybody
 forgets — **its commit messages**, which is where an agent working on somebody's
 behalf answers a finding when it cannot comment as the repository owner.
 
+Reading them is not the same as showing them. Each item was cut to a per-kind
+character cap that predated the character budget beside it, and nothing
+measured the gap. Over 24 closed pull requests in four repositories:
+
+```
+kind        n   median    p90     max   truncated   of text SHOWN
+review     60    4,167  7,137  10,706         83%             27%
+comment    63    1,100  1,817   2,317         70%             64%
+commit     77      507  1,643   3,992         10%             89%
+```
+
+**The reviewer was shown 27% of what it had itself said.** That is the mechanism
+behind "it re-raises a point I already answered" — not that it ignores the
+reply, but that it reads four endpoints and then throws most of them away. On a
+19-round pull request every one of the author's 21 rebuttals was over the cap,
+and the cut on the one disputing a finding landed mid-sentence, just before the
+paragraph naming the mechanism; the point came back three more times.
+
+The caps are now a guard against a pathological reply rather than a budget, set
+past the measured p90, and one that fires says where it cut. On that same pull
+request the conversation goes from **24% shown to 97%**. A three-to-five-round
+review carries about 27,000 characters of history and never approaches either
+limit, so the cost lands only on the long contested ones — which is where the
+failure was.
+
 ## What it does, in order
 
 1. Fetches the diff; drops lockfiles, images and build output.

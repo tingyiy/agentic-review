@@ -333,14 +333,89 @@ class TestConversation:
         assert out.count("— commit]") == 1
 
     def test_a_long_commit_message_is_capped(self, prr, monkeypatch):
-        """Commit messages in this org run long. Uncapped, one could crowd out
-        the findings it is meant to sit beside."""
+        """Commit messages in this org run long. Uncapped, a pathological one
+        could crowd out the findings it is meant to sit beside.
+
+        THE CAP IS A GUARD, NOT A BUDGET, and it is read from `ITEM_CAPS` rather
+        than written here again — a test that restates the number passes while
+        the two drift apart, which is how these sat three times too tight for
+        weeks after the budget replaced them.
+        """
+        cap = prr.ITEM_CAPS["commit"]
         self._stub(prr, monkeypatch, {
-            "/pulls/94/commits": [self._commit("x" * 4000, "2026-08-22T10:00:00Z")],
+            "/pulls/94/commits": [self._commit("x" * (cap + 500),
+                                               "2026-08-22T10:00:00Z")],
         })
         out = prr.conversation("infra", 94)
-        assert "x" * 1500 in out
-        assert "x" * 1600 not in out
+        assert "x" * cap in out
+        assert "x" * (cap + 1) not in out
+
+    def test_a_cut_item_says_it_was_cut(self, prr, monkeypatch):
+        """A silent cut hands the model half a sentence as a whole thought.
+
+        Half a rebuttal read as a complete one is how an answered point comes
+        back: on caeli-marketing#391 the cut landed mid-sentence, just before
+        the paragraph naming the mechanism, and the finding was re-raised three
+        more times.
+        """
+        cap = prr.ITEM_CAPS["comment"]
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": "y" * (cap + 250),
+                                     "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        out = prr.conversation("infra", 94)
+        assert "cut here: 250 more characters" in out
+
+    def test_an_item_that_fits_is_not_marked(self, prr, monkeypatch):
+        """The marker must mean something. Stamped on every item it is noise,
+        and the model learns to skip the line that matters."""
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": "short and complete",
+                                     "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        out = prr.conversation("infra", 94)
+        assert "short and complete" in out
+        assert "cut here" not in out
+
+    def test_a_typical_review_and_rebuttal_survive_whole(self, prr, monkeypatch):
+        """THE REGRESSION THIS EXISTS FOR, at the measured sizes.
+
+        Over 24 closed PRs in four repos the median review body was 4,167 chars
+        against a 1,200 cap and the median reply 1,100 against 800 — so 83% of
+        the reviewer's own prior findings and 70% of the author's answers were
+        cut, and it was shown 27% of what it had itself said. Both of these are
+        ordinary, not pathological, and both must arrive intact.
+        """
+        review, reply = "R" * 4_167, "A" * 1_100
+        self._stub(prr, monkeypatch, {
+            "/pulls/94/reviews": [{"body": review, "user": {"login": "bot"},
+                                   "state": "COMMENTED",
+                                   "submitted_at": "2026-08-22T10:00:00Z"}],
+            "/issues/94/comments": [{"body": reply, "user": {"login": "a"},
+                                     "created_at": "2026-08-22T11:00:00Z"}],
+        })
+        out = prr.conversation("infra", 94)
+        assert review in out, "the reviewer must see all of what it said"
+        assert reply in out, "and all of what the author answered"
+        assert "cut here" not in out
+
+    def test_the_caps_sit_above_the_measured_p90(self, prr):
+        """Set past p90 so the BUDGET limits and these do not. If a cap ever
+        drops back under the real distribution it silently becomes the
+        constraint again, which is the whole bug."""
+        p90 = {"review": 7_137, "comment": 1_817, "commit": 1_643}
+        for kind, seen in p90.items():
+            assert prr.ITEM_CAPS[kind] > seen, (
+                f"{kind} cap {prr.ITEM_CAPS[kind]} is under the measured p90 {seen}")
+
+    def test_the_budget_is_larger_than_a_long_prs_conversation(self, prr):
+        """Both numbers move together or neither does. The budget fills
+        newest-first, so caps raised alone would spend it on our own verbose
+        reviews and push the author's replies out — the opposite of the point.
+        caeli-marketing#391, 19 rounds, carries ~165,000 characters."""
+        assert prr.CONVERSATION_BUDGET >= 165_000
 
     def test_one_endpoint_failing_keeps_the_others(self, prr, monkeypatch):
         """Losing the whole conversation is what makes the tool repeat itself, so
