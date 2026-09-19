@@ -19,6 +19,10 @@ whole-body `json.loads` (right for a json_mode completion) died 489 chars into
 the first real run.
 """
 import json
+import os
+import pathlib
+import subprocess
+import sys
 import re
 
 import pytest
@@ -396,7 +400,47 @@ class TestConversation:
                                      "created_at": "2026-08-22T10:00:00Z"}],
         })
         prr.conversation("infra", 94)
-        assert "1 item(s) over their cap and cut" in capsys.readouterr().out
+        assert "1 shown item(s) over their cap and cut" in capsys.readouterr().out
+
+    def test_the_cut_count_is_of_items_the_model_SAW(self, prr, monkeypatch, capsys):
+        """Counted at read time it included items the budget then dropped, so
+        the line said "12 item(s) cut" about a conversation the model never saw
+        12 of. Raised by the reviewer. Here two items are over their cap and the
+        budget keeps only the newest one, so the honest count is 1."""
+        cap = prr.ITEM_CAPS["comment"]
+        over = "z" * (cap + 400)
+        monkeypatch.setattr(prr, "CONVERSATION_BUDGET", cap + 100)
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [
+                {"body": over, "user": {"login": "a"},
+                 "created_at": "2026-08-22T10:00:00Z"},
+                {"body": over, "user": {"login": "a"},
+                 "created_at": "2026-08-23T10:00:00Z"},
+            ],
+        })
+        prr.conversation("infra", 94)
+        out = capsys.readouterr().out
+        assert "1 shown item(s) over their cap and cut" in out, out
+        assert "1 older item(s) dropped" in out, out
+
+    def test_the_log_says_when_the_paging_fuse_bit(self, prr, monkeypatch, capsys):
+        """The one incompleteness the caps cannot explain: the newest items
+        never arrived. Nothing is over a cap and nothing is dropped, so this
+        summary was silent for exactly the case that most needs a line."""
+        # `_paged`, not `gh`: the stub feeds `gh` a JSON string and `_paged`
+        # builds its own list, so a subclass handed to `gh` never reaches the
+        # `truncated` check.
+        class _Truncated(list):
+            truncated = True
+
+        def fake_paged(path, **kw):
+            if path.endswith("/issues/94/comments"):
+                return _Truncated([{"body": "short", "user": {"login": "a"},
+                                    "created_at": "2026-08-22T10:00:00Z"}])
+            return []
+        monkeypatch.setattr(prr, "_paged", fake_paged)
+        prr.conversation("infra", 94)
+        assert "paging fuse bit" in capsys.readouterr().out
 
     def test_the_log_is_quiet_when_nothing_was_cut(self, prr, monkeypatch, capsys):
         """A line printed on every review is a line nobody reads."""
@@ -505,29 +549,35 @@ class TestConversation:
             f"{agent.MAX_TOOL_CHARS:,} chars need {needs:,}. The agent would be "
             f"forced to answer before it stopped reading.")
 
-    def test_the_caps_are_readable_from_the_env_file(self, prr, tmp_path, monkeypatch):
+    def test_the_caps_are_readable_from_the_env_file(self, tmp_path):
         """`REVIEW_ENV_FILES` is how a self-hosted runner supplies everything —
         an Actions step inherits `LANG` and little else — and it was wired only
         to credentials. An operator putting the cap in the file their runner
-        already uses would silently have got the default. Raised by the
-        reviewer."""
-        f = tmp_path / "env"
+        already uses would silently have got the default.
+
+        A SUBPROCESS, BECAUSE THE IMPORT ORDER IS THE CLAIM. The first version
+        reloaded `agentic_review.env` and then exec'd a fresh copy of
+        `review.py`, which proves `env.get` can read the file but manufactures
+        the state it is testing: in production `review` is imported once and
+        `ITEM_CAPS` is evaluated at that moment, so the claim depends on
+        `env.FILES` already being populated when `review` is first imported.
+        That test would stay green if `ITEM_CAPS` moved above `from . import
+        env`, while the operator silently got the default. Raised by the
+        reviewer. A subprocess reproduces the real order and touches no module
+        this session shares.
+        """
+        f = tmp_path / "runner.env"
         f.write_text("REVIEW_ITEM_CAP_COMMIT=20000\n")
-        monkeypatch.setenv("REVIEW_ENV_FILES", str(f))
-        monkeypatch.delenv("REVIEW_ITEM_CAP_COMMIT", raising=False)
-        import importlib.util
-        from agentic_review import env
-        importlib.reload(env)           # FILES is read at import
-        try:
-            spec = importlib.util.spec_from_file_location(
-                "agentic_review._env_probe", prr.__file__)
-            probe = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(probe)
-            assert probe.ITEM_CAPS["commit"] == 20000
-        finally:
-            monkeypatch.delenv("REVIEW_ITEM_CAP_COMMIT", raising=False)
-            monkeypatch.delenv("REVIEW_ENV_FILES", raising=False)
-            importlib.reload(env)
+        e = {k: v for k, v in os.environ.items()
+             if not k.startswith("REVIEW_ITEM_CAP_")}
+        e["REVIEW_ENV_FILES"] = str(f)
+        e["PYTHONPATH"] = str(pathlib.Path(__file__).resolve().parents[1])
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "from agentic_review import review; print(review.ITEM_CAPS['commit'])"],
+            capture_output=True, text=True, env=e, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "20000", (out.stdout, out.stderr)
 
     def test_no_single_kind_can_monopolise_the_budget(self, prr):
         """THE HALF THAT READS THE CAPS, and the reason this pair exists.
