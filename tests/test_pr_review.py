@@ -445,6 +445,29 @@ class TestConversation:
         assert "1 item(s) over their cap and cut" in out, out
         assert "of them kept" not in out, out
 
+    def test_an_item_QUOTING_the_marker_is_not_counted_as_cut(
+            self, prr, monkeypatch, capsys):
+        """Inferred from the text, the count caught any item that merely QUOTES
+        the marker — this repository's source does, and so does every PR that
+        discusses this code, including the one that introduced the line. A
+        conversation in which nothing was cut would print "(M of them kept)"
+        with M below N, corrupting the single signal the clause carries.
+        Raised by the reviewer, self-referentially."""
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [
+                {"body": "I think `[… cut here: 250 more characters]` is wrong",
+                 "user": {"login": "a"}, "created_at": "2026-08-22T10:00:00Z"},
+                {"body": "z" * (prr.ITEM_CAPS["comment"] + 400),
+                 "user": {"login": "a"}, "created_at": "2026-08-23T10:00:00Z"},
+            ],
+        })
+        prr.conversation("infra", 94)
+        out = capsys.readouterr().out
+        assert "1 item(s) over their cap and cut" in out, out
+        assert "of them kept" not in out, (
+            "the quoting item is not cut, so both counts are 1 and the "
+            "parenthetical is noise: " + out)
+
     def test_the_log_says_when_the_paging_fuse_bit(self, prr, monkeypatch, capsys):
         """The one incompleteness the caps cannot explain: the newest items
         never arrived. Nothing is over a cap and nothing is dropped, so this
@@ -564,11 +587,18 @@ class TestConversation:
                     + prr.shown_diff_cap()            # what build_prompt gives the diff
                     + prr.CONVERSATION_BUDGET)
         can_read = agent.MAX_TRANSCRIPT_CHARS - turn_one
-        needs = agent.MAX_TURNS * agent.MAX_TOOL_CHARS
+        # THE MARKER COUNTS. `_truncate` appends its note AFTER the cut, so a
+        # clipped result is MAX_TOOL_CHARS plus the note — measured here rather
+        # than assumed, because assuming it is what made the comment claim a
+        # margin 5,200 characters larger than it has.
+        clipped = len(agent._truncate("x" * (agent.MAX_TOOL_CHARS + 10_000)))
+        assert clipped > agent.MAX_TOOL_CHARS, (
+            "if _truncate ever bounds itself, drop this and the comment with it")
+        needs = agent.MAX_TURNS * clipped
         assert can_read >= needs, (
             f"turn one is {turn_one:,} of {agent.MAX_TRANSCRIPT_CHARS:,}, leaving "
             f"{can_read:,} for tool results — but {agent.MAX_TURNS} turns at "
-            f"{agent.MAX_TOOL_CHARS:,} chars need {needs:,}. The agent would be "
+            f"{clipped:,} chars need {needs:,}. The agent would be "
             f"forced to answer before it stopped reading.")
 
     def test_the_caps_are_readable_from_the_env_file(self, tmp_path):

@@ -517,10 +517,15 @@ def shown_diff_cap():
 #: leak — noted here because this paragraph is where someone will come looking.
 #:
 #: THAT FLOOR IS PROVABLY ENOUGH: `MAX_TURNS` is 40 and `MAX_TOOL_CHARS` is
-#: 6,000, so the loop cannot generate more than 240,000 characters of tool
-#: results before it stops of its own accord. 248,560 clears it. The pair is
-#: pinned by a test, because the margin is 8,560 characters and either constant
-#: could move.
+#: 6,000, so the loop cannot generate more than 40 clipped tool results before
+#: it stops of its own accord. NOT 240,000 CHARACTERS, THOUGH — `agent._truncate`
+#: appends its "[... truncated: N more chars …]" note AFTER the cut, exactly the
+#: shape fixed in `_capped_item` one function over and not carried across, so a
+#: clipped result is `MAX_TOOL_CHARS` plus about 120. Forty of them is ~245,200
+#: and the real margin is ~3,360, not the 8,560 this paragraph used to claim.
+#: It still clears, and the test now computes the need with the marker included
+#: rather than restating a number that was quietly optimistic. Raised by the
+#: reviewer.
 #:
 #: The transcript budget is NOT raised to buy more room. Its own comment says
 #: raising it "should be paid for by a measurement, not by the fact that the
@@ -682,7 +687,8 @@ def conversation(repo, pr):
                     when = (detail.get("author") or {}).get("date") or ""
                     if body:
                         cut_read += len(body) > cap
-                        items.append((when, f"[{who} — commit]\n{_capped_item(body, cap)}"))
+                        items.append((when, f"[{who} — commit]\n{_capped_item(body, cap)}",
+                                      len(body) > cap))
                     continue
                 body = (c.get("body") or "").strip()
                 if not body:
@@ -702,7 +708,8 @@ def conversation(repo, pr):
                 # is safe for them.
                 cut_read += len(body) > cap
                 items.append((c.get("submitted_at") or c.get("created_at") or "",
-                              f"[{who} — {tag}{where}]\n{_capped_item(body, cap)}"))
+                              f"[{who} — {tag}{where}]\n{_capped_item(body, cap)}",
+                              len(body) > cap))
         except Exception as e:
             # One endpoint failing must not discard the other two — losing the
             # whole conversation is what makes the tool repeat itself.
@@ -724,13 +731,13 @@ def conversation(repo, pr):
     # oldest — then re-sorted into order, because an argument reads forwards and
     # a finding must sit next to the commit that answered it.
     chosen, used = [], 0
-    for stamp, text in sorted(items, key=lambda x: x[0], reverse=True):
+    for stamp, text, was_cut in sorted(items, key=lambda x: x[0], reverse=True):
         if used + len(text) > CONVERSATION_BUDGET and chosen:
             break
-        chosen.append((stamp, text))
+        chosen.append((stamp, text, was_cut))
         used += len(text)
     dropped = len(items) - len(chosen)
-    out = [text for _, text in sorted(chosen, key=lambda x: x[0])]
+    out = [text for _, text, _ in sorted(chosen, key=lambda x: x[0])]
     # TWO POPULATIONS, BECAUSE ONE NUMBER CANNOT CARRY BOTH FACTS, and trying
     # to make it took three review rounds going in a circle.
     #
@@ -744,7 +751,14 @@ def conversation(repo, pr):
     # catch. Counting only the first says "cut" about items nobody saw. Both are
     # printed, and the second only when it differs, so neither claim is made of
     # the other's population.
-    cut_kept = sum("[… cut here:" in text for text in out)
+    # CARRIED, NOT INFERRED FROM THE TEXT. `sum("[… cut here:" in text ...)`
+    # counted any item whose body merely QUOTES the marker — this repository's
+    # own source does, and so does every PR that discusses this code, including
+    # the one that introduced the line. A conversation in which nothing was cut
+    # would then print "(M of them kept)" with M below N, corrupting the single
+    # signal the clause exists to carry. `_capped_item`'s decision is recorded
+    # where it is made.
+    cut_kept = sum(was_cut for _, _, was_cut in chosen)
     # SAY WHEN A CAP BITES, not what the caps are set to. A cap firing is
     # unusual — every kind is set past its measured p90 — so one that fires is
     # either a genuinely pathological item or a cap that did not take. The
