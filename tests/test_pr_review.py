@@ -477,6 +477,58 @@ class TestConversation:
             "the longest conversation measured does not fit; an author's oldest "
             "replies would be dropped on exactly the PRs where re-raising hurts")
 
+    def test_turn_one_leaves_room_for_every_turn_the_loop_can_take(self, prr):
+        """THE TWO BUDGETS READ TOGETHER, which nothing did until the reviewer
+        asked on this PR.
+
+        `conversation()` lands in `{prior}`, so it is in the user message of
+        every pass and counts against `agent.MAX_TRANSCRIPT_CHARS`, past which
+        the loop is forced to answer — and `agent.py` records the cost of that:
+        "round 4 answered in 77 characters after reading every changed file".
+        Doubling the conversation budget spends the agent's room to READ.
+
+        The floor is provable rather than judged: the loop cannot generate more
+        than `MAX_TURNS x MAX_TOOL_CHARS` of tool results before it stops of its
+        own accord, so turn one must leave at least that much. The margin is
+        about 8,500 characters and four constants feed it, which is exactly why
+        this is pinned instead of reasoned about once.
+        """
+        from agentic_review import agent, config
+        turn_one = (len(prr.PROMPT)
+                    + int(config.MAX_DIFF * 1.6)      # the expanded diff cap
+                    + prr.CONVERSATION_BUDGET)
+        can_read = agent.MAX_TRANSCRIPT_CHARS - turn_one
+        needs = agent.MAX_TURNS * agent.MAX_TOOL_CHARS
+        assert can_read >= needs, (
+            f"turn one is {turn_one:,} of {agent.MAX_TRANSCRIPT_CHARS:,}, leaving "
+            f"{can_read:,} for tool results — but {agent.MAX_TURNS} turns at "
+            f"{agent.MAX_TOOL_CHARS:,} chars need {needs:,}. The agent would be "
+            f"forced to answer before it stopped reading.")
+
+    def test_the_caps_are_readable_from_the_env_file(self, prr, tmp_path, monkeypatch):
+        """`REVIEW_ENV_FILES` is how a self-hosted runner supplies everything —
+        an Actions step inherits `LANG` and little else — and it was wired only
+        to credentials. An operator putting the cap in the file their runner
+        already uses would silently have got the default. Raised by the
+        reviewer."""
+        f = tmp_path / "env"
+        f.write_text("REVIEW_ITEM_CAP_COMMIT=20000\n")
+        monkeypatch.setenv("REVIEW_ENV_FILES", str(f))
+        monkeypatch.delenv("REVIEW_ITEM_CAP_COMMIT", raising=False)
+        import importlib.util
+        from agentic_review import env
+        importlib.reload(env)           # FILES is read at import
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "agentic_review._env_probe", prr.__file__)
+            probe = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(probe)
+            assert probe.ITEM_CAPS["commit"] == 20000
+        finally:
+            monkeypatch.delenv("REVIEW_ITEM_CAP_COMMIT", raising=False)
+            monkeypatch.delenv("REVIEW_ENV_FILES", raising=False)
+            importlib.reload(env)
+
     def test_no_single_kind_can_monopolise_the_budget(self, prr):
         """THE HALF THAT READS THE CAPS, and the reason this pair exists.
 

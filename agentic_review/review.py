@@ -54,6 +54,7 @@ import urllib.request
 from . import agent
 from . import checks
 from . import context as ctx
+from . import env
 from . import github
 from . import llm
 from . import status
@@ -471,7 +472,31 @@ Reply with ONLY this JSON, no prose around it:
 #: How much prior conversation the reviewer is shown. Generous on purpose: the
 #: cost of forgetting is a reviewer that argues with its own earlier advice,
 #: which is worse than any token bill and is what a 12-item cap actually bought.
-CONVERSATION_BUDGET = int(os.environ.get("REVIEW_CONVERSATION_BUDGET", 250_000))
+#: AND WHAT IT SPENDS OF THE AGENT'S TRANSCRIPT, because nothing read the two
+#: together until the reviewer asked. `conversation()` lands in `{prior}`, so it
+#: is in the user message of every pass and counts against
+#: `agent.MAX_TRANSCRIPT_CHARS`, past which the loop is FORCED to answer — and
+#: `agent.py` records what that costs: "round 4 answered in 77 characters after
+#: reading every changed file".
+#:
+#:     instructions                                     5,440
+#:     expanded diff, capped (MAX_DIFF * 1.6)          96,000
+#:     conversation, at this ceiling                  250,000
+#:     ------------------------------------------------------
+#:     turn one, worst case                           351,440   59% of 600,000
+#:     left for tool results                          248,560
+#:
+#: THAT FLOOR IS PROVABLY ENOUGH: `MAX_TURNS` is 40 and `MAX_TOOL_CHARS` is
+#: 6,000, so the loop cannot generate more than 240,000 characters of tool
+#: results before it stops of its own accord. 248,560 clears it. The pair is
+#: pinned by a test, because the margin is 8,560 characters and either constant
+#: could move.
+#:
+#: The transcript budget is NOT raised to buy more room. Its own comment says
+#: raising it "should be paid for by a measurement, not by the fact that the
+#: model would allow it", and every turn re-sends the transcript, so a longer
+#: one costs more than linearly across a loop.
+CONVERSATION_BUDGET = int(env.get("REVIEW_CONVERSATION_BUDGET") or 250_000)
 
 #: How much of ONE item is shown, by kind. These are a guard against a
 #: pathological reply — the 62,451-character looping one is on record — and NOT
@@ -522,7 +547,15 @@ CONVERSATION_BUDGET = int(os.environ.get("REVIEW_CONVERSATION_BUDGET", 250_000))
 #: the run that met the item is already over. What it buys is that an adopter
 #: tuning this reviewer can set every budget the same way, instead of finding
 #: that the one doing the cutting is the one they have to fork the code to move.
-ITEM_CAPS = {kind: int(os.environ.get(f"REVIEW_ITEM_CAP_{kind.upper()}", default))
+#: THROUGH `env.get`, NOT `os.environ`, so `REVIEW_ENV_FILES` reaches them.
+#: That file is how a self-hosted runner supplies everything else — an Actions
+#: step inherits `LANG` and little else — and it was wired only to credentials.
+#: An operator putting `REVIEW_ITEM_CAP_REVIEW=20000` in the env file their
+#: runner already uses would have silently got 8,000. Raised by the reviewer.
+#: `CONVERSATION_BUDGET` above goes the same way; `MAX_DIFF` and
+#: `MAX_TRANSCRIPT_CHARS` still read `os.environ` directly and are left alone
+#: here rather than half-migrated in a PR about the conversation.
+ITEM_CAPS = {kind: int(env.get(f"REVIEW_ITEM_CAP_{kind.upper()}") or default)
              for kind, default in (("review", 8_000), ("inline", 3_000),
                                    ("comment", 3_000), ("commit", 4_000))}
 

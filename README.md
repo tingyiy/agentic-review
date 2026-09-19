@@ -149,7 +149,7 @@ default:
 | `REVIEW_AGENT_TIMEOUT` | `900` | wall clock for one pass |
 | `REVIEW_ALERT_COMMAND` | *(unset)* | shell command that receives failures on stdin |
 | `REVIEW_STATUS_CONTEXT` | `agentic-review` | the commit status the reviewer sets on the PR head (pending → verdict) |
-| `REVIEW_CONVERSATION_BUDGET` | `250000` | characters of prior conversation the reviewer is shown, newest first |
+| `REVIEW_CONVERSATION_BUDGET` | `250000` | characters of prior conversation the reviewer is shown, newest first. It shares the agent's transcript budget with the diff, so raising it spends the agent's room to read |
 | `REVIEW_ITEM_CAP_REVIEW` | `8000` | most of one past review it is shown; a guard against a pathological reply, not a budget |
 | `REVIEW_ITEM_CAP_COMMENT` | `3000` | the same, for an issue comment |
 | `REVIEW_ITEM_CAP_INLINE` | `3000` | the same, for an inline reply |
