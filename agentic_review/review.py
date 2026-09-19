@@ -515,9 +515,13 @@ CONVERSATION_BUDGET = int(os.environ.get("REVIEW_CONVERSATION_BUDGET", 250_000))
 #: raising these alone would spend it on our own verbose reviews and push the
 #: author's replies out — the exact opposite of the point.
 #: READ FROM THE ENVIRONMENT, like `CONVERSATION_BUDGET` above and
-#: `MAX_TRANSCRIPT_CHARS` in the agent. An operator meeting a pathological item
-#: on their own runner could raise the budget and not the cap that was doing the
-#: cutting, which is the one knob that would have helped.
+#: `MAX_TRANSCRIPT_CHARS` in the agent — and READ AT IMPORT, like both of them,
+#: so changing one needs a restart. That is the whole claim. An earlier version
+#: of this comment said it let "an operator meeting a pathological item raise
+#: the cap that was doing the cutting", which is not true of any of the three:
+#: the run that met the item is already over. What it buys is that an adopter
+#: tuning this reviewer can set every budget the same way, instead of finding
+#: that the one doing the cutting is the one they have to fork the code to move.
 ITEM_CAPS = {kind: int(os.environ.get(f"REVIEW_ITEM_CAP_{kind.upper()}", default))
              for kind, default in (("review", 8_000), ("inline", 3_000),
                                    ("comment", 3_000), ("commit", 4_000))}

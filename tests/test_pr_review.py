@@ -426,24 +426,46 @@ class TestConversation:
             assert prr.ITEM_CAPS[kind] > seen, (
                 f"{kind} cap {prr.ITEM_CAPS[kind]} is under the measured p90 {seen}")
 
-    def test_the_budget_holds_a_long_prs_conversation_at_these_caps(self, prr):
-        """Both numbers move together or neither does.
+    def test_the_budget_holds_the_worst_conversation_measured(self, prr):
+        """ALL FOUR ENDPOINTS, not the two I first counted.
 
-        THE ASSERTION HAS TO READ BOTH, or it is not that guard. This asserted
-        `CONVERSATION_BUDGET >= 165_000` while its docstring promised a
-        relationship — so raising every cap to 100,000, which would let four
-        items eat the whole budget and drop every older reply, left it green.
-        Found by the reviewer on the PR that wrote it.
+        The budget fills from the union of reviews, inline replies, issue
+        comments and commit messages. The first version of this guard summed
+        review + comment only, which under-counted the population it guards —
+        commits were a THIRD of the items on the PR this change is named for.
+        Raised by the reviewer; measured rather than argued, both longest PRs,
+        every endpoint, at the current caps:
 
-        A round is one review plus one author reply. 19 of them is the longest
-        real PR measured; the budget must hold that many at the CURRENT caps,
-        so raising a cap without the budget fails here.
+            #391   21 reviews,  0 inline, 22 comments, 20 commits -> 207,067
+            #212   20 reviews,  6 inline, 17 comments, 21 commits -> 140,963
+
+        Counting `items x cap` instead would say 332,000 for #391 and demand a
+        budget a third larger than anything real, because it assumes every item
+        sits at its cap and almost none do — the median review is 4,167 against
+        a cap of 8,000. The guard against a cap rising is the next test; this
+        one is against the BUDGET falling below observed reality.
         """
-        rounds = 19
-        need = (prr.ITEM_CAPS["review"] + prr.ITEM_CAPS["comment"]) * rounds
-        assert prr.CONVERSATION_BUDGET >= need, (
-            f"{rounds} rounds at these caps needs {need:,} chars but the budget "
-            f"is {prr.CONVERSATION_BUDGET:,} — raise it, or lower the caps")
+        assert prr.CONVERSATION_BUDGET >= 207_067, (
+            "the longest conversation measured does not fit; an author's oldest "
+            "replies would be dropped on exactly the PRs where re-raising hurts")
+
+    def test_no_single_kind_can_monopolise_the_budget(self, prr):
+        """THE HALF THAT READS THE CAPS, and the reason this pair exists.
+
+        The predecessor asserted `CONVERSATION_BUDGET >= 165_000` while its
+        docstring promised "both numbers move together" — so raising every cap
+        to 100,000, enough for four items to eat the budget and drop every older
+        reply, left it green. Proven before fixing: with the floor, blown caps
+        pass; with this, they fail.
+
+        19 rounds is the longest real PR. That many of the LARGEST item kind
+        must still fit, so a cap raised without the budget fails here.
+        """
+        rounds, biggest = 19, max(prr.ITEM_CAPS.values())
+        assert biggest * rounds <= prr.CONVERSATION_BUDGET, (
+            f"{rounds} items at the largest cap ({biggest:,}) is "
+            f"{biggest * rounds:,}, over the {prr.CONVERSATION_BUDGET:,} budget "
+            f"— raise the budget, or lower the cap")
 
     def test_a_cut_item_stays_within_its_cap(self, prr):
         """The marker counts against the cap.
@@ -470,14 +492,23 @@ class TestConversation:
         """Every other budget here is — `REVIEW_CONVERSATION_BUDGET`,
         `REVIEW_MAX_TRANSCRIPT`. An operator meeting a pathological item could
         raise the budget and not the cap that was doing the cutting."""
-        import importlib
+        # A THROWAWAY MODULE OBJECT. `importlib.reload(prr)` re-executes the
+        # file in the namespace every other test in the session holds a
+        # reference to, so this test would rebind module-level state for all of
+        # them and be correct only because a `finally` put it back — a
+        # correctness that no assertion here protects and that a moved line
+        # would quietly lose. Raised by the reviewer.
+        import importlib.util
         monkeypatch.setenv("REVIEW_ITEM_CAP_REVIEW", "12345")
-        reloaded = importlib.reload(prr)
-        try:
-            assert reloaded.ITEM_CAPS["review"] == 12345
-        finally:
-            monkeypatch.delenv("REVIEW_ITEM_CAP_REVIEW")
-            importlib.reload(prr)
+        # A DOTTED NAME INSIDE THE PACKAGE, or the file's `from .errors import`
+        # has no package to resolve against and the exec dies on line 54.
+        spec = importlib.util.spec_from_file_location(
+            "agentic_review._cap_probe", prr.__file__)
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        assert probe.ITEM_CAPS["review"] == 12345
+        assert prr.ITEM_CAPS["review"] != 12345, (
+            "the shared module must be untouched by this test")
 
     def test_one_endpoint_failing_keeps_the_others(self, prr, monkeypatch):
         """Losing the whole conversation is what makes the tool repeat itself, so
