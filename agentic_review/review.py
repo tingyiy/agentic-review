@@ -645,7 +645,7 @@ def conversation(repo, pr):
     # four measurements") lived in a commit message, and this function returned
     # an empty conversation on every round. The block below then told the model
     # not to repeat itself while showing it nothing it had already been told.
-    items, cut_short = [], False
+    items, cut_short, cut_read = [], False, 0
     for path, kind, cap in (
         # `per_page=100` ON ALL FOUR. Three of these were left at GitHub's
         # default of 30 because "they never exceed it" — but the default returns
@@ -681,6 +681,7 @@ def conversation(repo, pr):
                            or (c.get("author") or {}).get("login") or "?")
                     when = (detail.get("author") or {}).get("date") or ""
                     if body:
+                        cut_read += len(body) > cap
                         items.append((when, f"[{who} — commit]\n{_capped_item(body, cap)}"))
                     continue
                 body = (c.get("body") or "").strip()
@@ -699,6 +700,7 @@ def conversation(repo, pr):
                 # commit answering it end up in different halves of the text.
                 # The comment endpoints carry no `submitted_at`, so the chain
                 # is safe for them.
+                cut_read += len(body) > cap
                 items.append((c.get("submitted_at") or c.get("created_at") or "",
                               f"[{who} — {tag}{where}]\n{_capped_item(body, cap)}"))
         except Exception as e:
@@ -729,11 +731,20 @@ def conversation(repo, pr):
         used += len(text)
     dropped = len(items) - len(chosen)
     out = [text for _, text in sorted(chosen, key=lambda x: x[0])]
-    # COUNTED OVER WHAT SURVIVED, not over what was read. Counting at read time
-    # included items the budget then dropped, so the line said "12 item(s) cut"
-    # about a conversation the model never saw 12 of — a number that did not
-    # mean what its own words claimed. Raised by the reviewer.
-    cut = sum("[… cut here:" in text for text in out)
+    # TWO POPULATIONS, BECAUSE ONE NUMBER CANNOT CARRY BOTH FACTS, and trying
+    # to make it took three review rounds going in a circle.
+    #
+    #   cut_read  — caps that FIRED, over everything read. The operator signal:
+    #               a cap that did not take (`REVIEW_ITEM_CAP_REVIEWS`, plural)
+    #               shows up here and nowhere else.
+    #   cut_kept  — cuts in what the model is actually handed.
+    #
+    # Counting only the second went silent when the pathological item was old
+    # enough for the budget to drop it — exactly the case the line exists to
+    # catch. Counting only the first says "cut" about items nobody saw. Both are
+    # printed, and the second only when it differs, so neither claim is made of
+    # the other's population.
+    cut_kept = sum("[… cut here:" in text for text in out)
     # SAY WHEN A CAP BITES, not what the caps are set to. A cap firing is
     # unusual — every kind is set past its measured p90 — so one that fires is
     # either a genuinely pathological item or a cap that did not take. The
@@ -749,14 +760,16 @@ def conversation(repo, pr):
     # case this summary was silent for, because nothing was over a cap and
     # nothing was dropped. `_paged` prints its own line, but it names an
     # endpoint path rather than the conversation. Raised by the reviewer.
-    if dropped or cut or cut_short:
+    if dropped or cut_read or cut_short:
         parts = [f"{len(chosen)} of {len(items)} items ({used:,} chars)"]
-        if cut:
-            # NOT "shown": this function returns a block that `main` concatenates
-            # and interpolates two thousand lines away, so what the model
-            # finally sees is not a claim `conversation()` can make. It is
-            # exact about what survived the budget, and says only that.
-            parts.append(f"{cut} surviving item(s) over their cap and cut")
+        if cut_read:
+            # NOT "shown": this function returns a block that `main`
+            # concatenates and interpolates two thousand lines away, so what
+            # the model finally sees is not a claim `conversation()` can make.
+            clause = f"{cut_read} item(s) over their cap and cut"
+            if cut_kept != cut_read:
+                clause += f" ({cut_kept} of them kept)"
+            parts.append(clause)
         if dropped:
             parts.append(f"{dropped} older item(s) dropped")
         if cut_short:

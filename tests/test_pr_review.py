@@ -400,13 +400,19 @@ class TestConversation:
                                      "created_at": "2026-08-22T10:00:00Z"}],
         })
         prr.conversation("infra", 94)
-        assert "1 surviving item(s) over their cap and cut" in capsys.readouterr().out
+        assert "1 item(s) over their cap and cut" in capsys.readouterr().out
 
-    def test_the_cut_count_is_of_items_the_model_SAW(self, prr, monkeypatch, capsys):
-        """Counted at read time it included items the budget then dropped, so
-        the line said "12 item(s) cut" about a conversation the model never saw
-        12 of. Raised by the reviewer. Here two items are over their cap and the
-        budget keeps only the newest one, so the honest count is 1."""
+    def test_a_cap_that_fired_is_reported_even_if_the_item_was_dropped(
+            self, prr, monkeypatch, capsys):
+        """TWO POPULATIONS, and three review rounds went in a circle over them.
+
+        Counting only what the budget KEPT went silent when the pathological
+        item was old enough to be dropped — exactly the case the line exists to
+        catch, since a cap that did not take (`REVIEW_ITEM_CAP_REVIEWS`,
+        plural) shows up nowhere else. Counting only what was READ says "cut"
+        about items nobody saw. Here two items are over their cap and the
+        budget keeps one, so the line must report both facts.
+        """
         cap = prr.ITEM_CAPS["comment"]
         over = "z" * (cap + 400)
         monkeypatch.setattr(prr, "CONVERSATION_BUDGET", cap + 100)
@@ -420,8 +426,24 @@ class TestConversation:
         })
         prr.conversation("infra", 94)
         out = capsys.readouterr().out
-        assert "1 surviving item(s) over their cap and cut" in out, out
+        assert "2 item(s) over their cap and cut (1 of them kept)" in out, out
         assert "1 older item(s) dropped" in out, out
+
+    def test_the_kept_count_is_left_out_when_it_adds_nothing(
+            self, prr, monkeypatch, capsys):
+        """A parenthetical that is always there is a parenthetical nobody
+        reads. When every cut item survived, the two numbers are the same and
+        only one is printed."""
+        cap = prr.ITEM_CAPS["comment"]
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": "z" * (cap + 400),
+                                     "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        prr.conversation("infra", 94)
+        out = capsys.readouterr().out
+        assert "1 item(s) over their cap and cut" in out, out
+        assert "of them kept" not in out, out
 
     def test_the_log_says_when_the_paging_fuse_bit(self, prr, monkeypatch, capsys):
         """The one incompleteness the caps cannot explain: the newest items
