@@ -400,7 +400,7 @@ class TestConversation:
                                      "created_at": "2026-08-22T10:00:00Z"}],
         })
         prr.conversation("infra", 94)
-        assert "1 shown item(s) over their cap and cut" in capsys.readouterr().out
+        assert "1 surviving item(s) over their cap and cut" in capsys.readouterr().out
 
     def test_the_cut_count_is_of_items_the_model_SAW(self, prr, monkeypatch, capsys):
         """Counted at read time it included items the budget then dropped, so
@@ -420,7 +420,7 @@ class TestConversation:
         })
         prr.conversation("infra", 94)
         out = capsys.readouterr().out
-        assert "1 shown item(s) over their cap and cut" in out, out
+        assert "1 surviving item(s) over their cap and cut" in out, out
         assert "1 older item(s) dropped" in out, out
 
     def test_the_log_says_when_the_paging_fuse_bit(self, prr, monkeypatch, capsys):
@@ -539,7 +539,7 @@ class TestConversation:
         """
         from agentic_review import agent, config
         turn_one = (len(prr.PROMPT)
-                    + int(config.MAX_DIFF * 1.6)      # the expanded diff cap
+                    + prr.shown_diff_cap()            # what build_prompt gives the diff
                     + prr.CONVERSATION_BUDGET)
         can_read = agent.MAX_TRANSCRIPT_CHARS - turn_one
         needs = agent.MAX_TURNS * agent.MAX_TOOL_CHARS

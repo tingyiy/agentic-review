@@ -472,6 +472,24 @@ Reply with ONLY this JSON, no prose around it:
 #: How much prior conversation the reviewer is shown. Generous on purpose: the
 #: cost of forgetting is a reviewer that argues with its own earlier advice,
 #: which is worse than any token bill and is what a 12-item cap actually bought.
+#: What `build_prompt` lets the diff take, as ONE constant rather than the same
+#: expression written twice. The transcript floor below is arithmetic on this
+#: number, and `expand_hunks` is NOT bounded by it — its docstring says it
+#: returns the ORIGINAL diff when expanding would breach the cap, and that diff
+#: is bounded by `MAX_FILE_DIFF` (2 * MAX_DIFF), half again as large. `_capped`
+#: is what actually holds the line, so the floor depends on `_capped`'s limit
+#: and this constant being the same thing. Raised by the reviewer, whose point
+#: was that a margin of 8,560 characters should not rest on two literals
+#: agreeing.
+#:
+#: A FUNCTION, NOT A CONSTANT. Frozen at import it stopped tracking `MAX_DIFF`,
+#: and `test_the_prompt_itself_is_capped` — which patches `MAX_DIFF` to prove
+#: the cap sits at the CALL SITE rather than inside `expand_hunks` — went red.
+#: That test is there because a single big file reaching the model whole is what
+#: emptied the transcript on infra#180, and it caught this within the minute.
+def shown_diff_cap():
+    return int(MAX_DIFF * 1.6)
+
 #: AND WHAT IT SPENDS OF THE AGENT'S TRANSCRIPT, because nothing read the two
 #: together until the reviewer asked. `conversation()` lands in `{prior}`, so it
 #: is in the user message of every pass and counts against
@@ -485,6 +503,18 @@ Reply with ONLY this JSON, no prose around it:
 #:     ------------------------------------------------------
 #:     turn one, worst case                           351,440   59% of 600,000
 #:     left for tool results                          248,560
+#:
+#: PER PASS, NOT PER REVIEW. `prior` is built once and handed to `build_prompt`
+#: for every pass, so each of `MAX_PASSES` starts a fresh `agent.run` carrying
+#: the same conversation — the floor above holds for each of them separately,
+#: which is what matters, but the cost is paid that many times. `_look_again`
+#: and `_revise` RESUME a pass rather than starting one, and `agent.resume`
+#: deliberately allows `inherited + RESUME_HEADROOM`, past
+#: `MAX_TRANSCRIPT_CHARS`: a forced pass is at the budget by construction, so a
+#: resume sharing the absolute cap would be forced on turn 1 with zero tool
+#: calls (measured on caeli-marketing#212). Enlarging the conversation enlarges
+#: `inherited` and so that allowance too. That is the documented design, not a
+#: leak — noted here because this paragraph is where someone will come looking.
 #:
 #: THAT FLOOR IS PROVABLY ENOUGH: `MAX_TURNS` is 40 and `MAX_TOOL_CHARS` is
 #: 6,000, so the loop cannot generate more than 240,000 characters of tool
@@ -722,7 +752,11 @@ def conversation(repo, pr):
     if dropped or cut or cut_short:
         parts = [f"{len(chosen)} of {len(items)} items ({used:,} chars)"]
         if cut:
-            parts.append(f"{cut} shown item(s) over their cap and cut")
+            # NOT "shown": this function returns a block that `main` concatenates
+            # and interpolates two thousand lines away, so what the model
+            # finally sees is not a claim `conversation()` can make. It is
+            # exact about what survived the budget, and says only that.
+            parts.append(f"{cut} surviving item(s) over their cap and cut")
         if dropped:
             parts.append(f"{dropped} older item(s) dropped")
         if cut_short:
@@ -1023,8 +1057,8 @@ def build_prompt(repo, work, part, caveats="", context="", prior=""):
     prompt — so nothing downstream of `pr_diff` was guarding what actually
     reaches the model.
     """
-    shown = _capped(ctx.expand_hunks(part, work, max_chars=int(MAX_DIFF * 1.6)),
-                    int(MAX_DIFF * 1.6))
+    cap = shown_diff_cap()
+    shown = _capped(ctx.expand_hunks(part, work, max_chars=cap), cap)
     prompt = PROMPT.format(repo=repo, path=work, diff=shown, caveats=caveats,
                            context=context, prior=prior)
     return prompt, shown
