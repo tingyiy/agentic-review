@@ -582,7 +582,7 @@ def conversation(repo, pr):
     # four measurements") lived in a commit message, and this function returned
     # an empty conversation on every round. The block below then told the model
     # not to repeat itself while showing it nothing it had already been told.
-    items, cut_short = [], False
+    items, cut_short, cut = [], False, 0
     for path, kind, cap in (
         # `per_page=100` ON ALL FOUR. Three of these were left at GitHub's
         # default of 30 because "they never exceed it" — but the default returns
@@ -618,6 +618,7 @@ def conversation(repo, pr):
                            or (c.get("author") or {}).get("login") or "?")
                     when = (detail.get("author") or {}).get("date") or ""
                     if body:
+                        cut += len(body) > cap
                         items.append((when, f"[{who} — commit]\n{_capped_item(body, cap)}"))
                     continue
                 body = (c.get("body") or "").strip()
@@ -636,6 +637,7 @@ def conversation(repo, pr):
                 # commit answering it end up in different halves of the text.
                 # The comment endpoints carry no `submitted_at`, so the chain
                 # is safe for them.
+                cut += len(body) > cap
                 items.append((c.get("submitted_at") or c.get("created_at") or "",
                               f"[{who} — {tag}{where}]\n{_capped_item(body, cap)}"))
         except Exception as e:
@@ -666,9 +668,22 @@ def conversation(repo, pr):
         used += len(text)
     dropped = len(items) - len(chosen)
     out = [text for _, text in sorted(chosen, key=lambda x: x[0])]
-    if dropped:
-        print(f"  conversation: {len(chosen)} of {len(items)} items "
-              f"({used:,} chars); {dropped} older item(s) dropped", flush=True)
+    # SAY WHEN A CAP BITES, not what the caps are set to. A cap firing is
+    # unusual — every kind is set past its measured p90 — so one that fires is
+    # either a genuinely pathological item or a cap that did not take. The
+    # second is easy to produce: `ITEM_CAPS` builds its keys from a fixed tuple,
+    # so `REVIEW_ITEM_CAP_REVIEWS` (plural — the endpoint is `/reviews`) is
+    # accepted by `os.environ.get` and silently ignored, and on a self-hosted
+    # runner the only feedback is a review that still cuts. Echoing the resolved
+    # config would answer that too, but the effect is the thing worth a line:
+    # it is also true when the cap is right and the item is enormous.
+    if dropped or cut:
+        parts = [f"{len(chosen)} of {len(items)} items ({used:,} chars)"]
+        if cut:
+            parts.append(f"{cut} item(s) over their cap and cut")
+        if dropped:
+            parts.append(f"{dropped} older item(s) dropped")
+        print("  conversation: " + "; ".join(parts), flush=True)
     if not out:
         # AN EMPTY HISTORY AND AN EMPTY-BUT-TRUNCATED ONE ARE NOT THE SAME.
         # Every surviving item can have an empty body (bare APPROVEs) while the

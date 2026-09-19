@@ -379,6 +379,34 @@ class TestConversation:
         assert kept + dropped == len(body), (
             f"marker says {dropped} dropped, but {kept} of {len(body)} survived")
 
+    def test_the_log_says_when_a_cap_bit(self, prr, monkeypatch, capsys):
+        """A cap firing is unusual — every kind is set past its measured p90 —
+        so one that fires is either a pathological item or a cap that did not
+        take. `ITEM_CAPS` builds its keys from a fixed tuple, so
+        `REVIEW_ITEM_CAP_REVIEWS` (plural, the endpoint is `/reviews`) is
+        accepted by `os.environ.get` and silently ignored; on a self-hosted
+        runner the only feedback is a review that still cuts. Raised by the
+        reviewer, which asked for the resolved config to be echoed — the
+        EFFECT is the better line, because it is also true when the cap is
+        right and the item is enormous."""
+        cap = prr.ITEM_CAPS["comment"]
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": "y" * (cap + 900),
+                                     "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        prr.conversation("infra", 94)
+        assert "1 item(s) over their cap and cut" in capsys.readouterr().out
+
+    def test_the_log_is_quiet_when_nothing_was_cut(self, prr, monkeypatch, capsys):
+        """A line printed on every review is a line nobody reads."""
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": "short", "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        prr.conversation("infra", 94)
+        assert "conversation:" not in capsys.readouterr().out
+
     def test_an_item_that_fits_is_not_marked(self, prr, monkeypatch):
         """The marker must mean something. Stamped on every item it is noise,
         and the model learns to skip the line that matters."""
