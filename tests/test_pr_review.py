@@ -19,6 +19,11 @@ whole-body `json.loads` (right for a json_mode completion) died 489 chars into
 the first real run.
 """
 import json
+import os
+import pathlib
+import subprocess
+import sys
+import re
 
 import pytest
 from agentic_review.errors import ReviewError as ScanError
@@ -333,14 +338,359 @@ class TestConversation:
         assert out.count("— commit]") == 1
 
     def test_a_long_commit_message_is_capped(self, prr, monkeypatch):
-        """Commit messages in this org run long. Uncapped, one could crowd out
-        the findings it is meant to sit beside."""
+        """Commit messages in this org run long. Uncapped, a pathological one
+        could crowd out the findings it is meant to sit beside.
+
+        THE CAP IS A GUARD, NOT A BUDGET, and it is read from `ITEM_CAPS` rather
+        than written here again — a test that restates the number passes while
+        the two drift apart, which is how these sat three times too tight for
+        weeks after the budget replaced them.
+        """
+        cap = prr.ITEM_CAPS["commit"]
         self._stub(prr, monkeypatch, {
-            "/pulls/94/commits": [self._commit("x" * 4000, "2026-08-22T10:00:00Z")],
+            "/pulls/94/commits": [self._commit("x" * (cap + 500),
+                                               "2026-08-22T10:00:00Z")],
         })
         out = prr.conversation("infra", 94)
-        assert "x" * 1500 in out
-        assert "x" * 1600 not in out
+        assert "x" * (cap + 1) not in out, "the body must be cut"
+        assert "x" * 100 in out, "and something of it must survive"
+
+    def test_a_cut_item_says_it_was_cut(self, prr, monkeypatch):
+        """A silent cut hands the model half a sentence as a whole thought.
+
+        Half a rebuttal read as a complete one is how an answered point comes
+        back: on caeli-marketing#391 the cut landed mid-sentence, just before
+        the paragraph naming the mechanism, and the finding was re-raised three
+        more times.
+        """
+        cap = prr.ITEM_CAPS["comment"]
+        body = "y" * (cap + 250)
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": body, "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        out = prr.conversation("infra", 94)
+        # THE COUNT MUST ACCOUNT FOR EXACTLY WHAT WAS DROPPED — asserted as an
+        # invariant against the original body, not restated from the formula,
+        # which would go green on a broken one.
+        m = re.search(r"cut here: ([\d,]+) more characters", out)
+        assert m, out[-200:]
+        dropped = int(m.group(1).replace(",", ""))
+        # The CONTIGUOUS run, not `out.count("y")` — the instruction header
+        # around the block contains the letter ("do not repeat yourself"), and
+        # counting those made the invariant look violated by 5 when it held.
+        kept = len(re.search(r"y{10,}", out).group(0))
+        assert kept + dropped == len(body), (
+            f"marker says {dropped} dropped, but {kept} of {len(body)} survived")
+
+    def test_the_log_says_when_a_cap_bit(self, prr, monkeypatch, capsys):
+        """A cap firing is unusual — every kind is set past its measured p90 —
+        so one that fires is either a pathological item or a cap that did not
+        take. `ITEM_CAPS` builds its keys from a fixed tuple, so
+        `REVIEW_ITEM_CAP_REVIEWS` (plural, the endpoint is `/reviews`) is
+        accepted by `os.environ.get` and silently ignored; on a self-hosted
+        runner the only feedback is a review that still cuts. Raised by the
+        reviewer, which asked for the resolved config to be echoed — the
+        EFFECT is the better line, because it is also true when the cap is
+        right and the item is enormous."""
+        cap = prr.ITEM_CAPS["comment"]
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": "y" * (cap + 900),
+                                     "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        prr.conversation("infra", 94)
+        assert "1 item(s) over their cap and cut" in capsys.readouterr().out
+
+    def test_a_cap_that_fired_is_reported_even_if_the_item_was_dropped(
+            self, prr, monkeypatch, capsys):
+        """TWO POPULATIONS, and three review rounds went in a circle over them.
+
+        Counting only what the budget KEPT went silent when the pathological
+        item was old enough to be dropped — exactly the case the line exists to
+        catch, since a cap that did not take (`REVIEW_ITEM_CAP_REVIEWS`,
+        plural) shows up nowhere else. Counting only what was READ says "cut"
+        about items nobody saw. Here two items are over their cap and the
+        budget keeps one, so the line must report both facts.
+        """
+        cap = prr.ITEM_CAPS["comment"]
+        over = "z" * (cap + 400)
+        monkeypatch.setattr(prr, "CONVERSATION_BUDGET", cap + 100)
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [
+                {"body": over, "user": {"login": "a"},
+                 "created_at": "2026-08-22T10:00:00Z"},
+                {"body": over, "user": {"login": "a"},
+                 "created_at": "2026-08-23T10:00:00Z"},
+            ],
+        })
+        prr.conversation("infra", 94)
+        out = capsys.readouterr().out
+        assert "2 item(s) over their cap and cut (1 of them kept)" in out, out
+        assert "1 older item(s) dropped" in out, out
+
+    def test_the_kept_count_is_left_out_when_it_adds_nothing(
+            self, prr, monkeypatch, capsys):
+        """A parenthetical that is always there is a parenthetical nobody
+        reads. When every cut item survived, the two numbers are the same and
+        only one is printed."""
+        cap = prr.ITEM_CAPS["comment"]
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": "z" * (cap + 400),
+                                     "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        prr.conversation("infra", 94)
+        out = capsys.readouterr().out
+        assert "1 item(s) over their cap and cut" in out, out
+        assert "of them kept" not in out, out
+
+    def test_an_item_QUOTING_the_marker_is_not_counted_as_cut(
+            self, prr, monkeypatch, capsys):
+        """Inferred from the text, the count caught any item that merely QUOTES
+        the marker — this repository's source does, and so does every PR that
+        discusses this code, including the one that introduced the line. A
+        conversation in which nothing was cut would print "(M of them kept)"
+        with M below N, corrupting the single signal the clause carries.
+        Raised by the reviewer, self-referentially."""
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [
+                {"body": "I think `[… cut here: 250 more characters]` is wrong",
+                 "user": {"login": "a"}, "created_at": "2026-08-22T10:00:00Z"},
+                {"body": "z" * (prr.ITEM_CAPS["comment"] + 400),
+                 "user": {"login": "a"}, "created_at": "2026-08-23T10:00:00Z"},
+            ],
+        })
+        prr.conversation("infra", 94)
+        out = capsys.readouterr().out
+        assert "1 item(s) over their cap and cut" in out, out
+        assert "of them kept" not in out, (
+            "the quoting item is not cut, so both counts are 1 and the "
+            "parenthetical is noise: " + out)
+
+    def test_the_log_says_when_the_paging_fuse_bit(self, prr, monkeypatch, capsys):
+        """The one incompleteness the caps cannot explain: the newest items
+        never arrived. Nothing is over a cap and nothing is dropped, so this
+        summary was silent for exactly the case that most needs a line."""
+        # `_paged`, not `gh`: the stub feeds `gh` a JSON string and `_paged`
+        # builds its own list, so a subclass handed to `gh` never reaches the
+        # `truncated` check.
+        class _Truncated(list):
+            truncated = True
+
+        def fake_paged(path, **kw):
+            if path.endswith("/issues/94/comments"):
+                return _Truncated([{"body": "short", "user": {"login": "a"},
+                                    "created_at": "2026-08-22T10:00:00Z"}])
+            return []
+        monkeypatch.setattr(prr, "_paged", fake_paged)
+        prr.conversation("infra", 94)
+        assert "paging fuse bit" in capsys.readouterr().out
+
+    def test_the_log_is_quiet_when_nothing_was_cut(self, prr, monkeypatch, capsys):
+        """A line printed on every review is a line nobody reads."""
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": "short", "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        prr.conversation("infra", 94)
+        assert "conversation:" not in capsys.readouterr().out
+
+    def test_an_item_that_fits_is_not_marked(self, prr, monkeypatch):
+        """The marker must mean something. Stamped on every item it is noise,
+        and the model learns to skip the line that matters."""
+        self._stub(prr, monkeypatch, {
+            "/issues/94/comments": [{"body": "short and complete",
+                                     "user": {"login": "a"},
+                                     "created_at": "2026-08-22T10:00:00Z"}],
+        })
+        out = prr.conversation("infra", 94)
+        assert "short and complete" in out
+        assert "cut here" not in out
+
+    def test_a_typical_review_and_rebuttal_survive_whole(self, prr, monkeypatch):
+        """THE REGRESSION THIS EXISTS FOR, at the measured sizes.
+
+        Over 24 closed PRs in four repos the median review body was 4,167 chars
+        against a 1,200 cap and the median reply 1,100 against 800 — so 83% of
+        the reviewer's own prior findings and 70% of the author's answers were
+        cut, and it was shown 27% of what it had itself said. Both of these are
+        ordinary, not pathological, and both must arrive intact.
+        """
+        review, reply = "R" * 4_167, "A" * 1_100
+        self._stub(prr, monkeypatch, {
+            "/pulls/94/reviews": [{"body": review, "user": {"login": "bot"},
+                                   "state": "COMMENTED",
+                                   "submitted_at": "2026-08-22T10:00:00Z"}],
+            "/issues/94/comments": [{"body": reply, "user": {"login": "a"},
+                                     "created_at": "2026-08-22T11:00:00Z"}],
+        })
+        out = prr.conversation("infra", 94)
+        assert review in out, "the reviewer must see all of what it said"
+        assert reply in out, "and all of what the author answered"
+        assert "cut here" not in out
+
+    def test_the_caps_sit_above_the_measured_p90(self, prr):
+        """Set past p90 so the BUDGET limits and these do not. If a cap ever
+        drops back under the real distribution it silently becomes the
+        constraint again, which is the whole bug."""
+        p90 = {"review": 7_137, "comment": 1_817, "commit": 1_643, "inline": 460}
+        assert set(p90) == set(prr.ITEM_CAPS), (
+            "every cap needs a measurement behind it — a kind missing from this "
+            "dict is a kind this guard silently cannot protect, which is how "
+            "`inline` shipped at 3,000 with nothing behind it")
+        for kind, seen in p90.items():
+            assert prr.ITEM_CAPS[kind] > seen, (
+                f"{kind} cap {prr.ITEM_CAPS[kind]} is under the measured p90 {seen}")
+
+    def test_the_budget_holds_the_worst_conversation_measured(self, prr):
+        """ALL FOUR ENDPOINTS, not the two I first counted.
+
+        The budget fills from the union of reviews, inline replies, issue
+        comments and commit messages. The first version of this guard summed
+        review + comment only, which under-counted the population it guards —
+        commits were a THIRD of the items on the PR this change is named for.
+        Raised by the reviewer; measured rather than argued, both longest PRs,
+        every endpoint, at the current caps:
+
+            #391   21 reviews,  0 inline, 22 comments, 20 commits -> 207,067
+            #212   20 reviews,  6 inline, 17 comments, 21 commits -> 140,963
+
+        Counting `items x cap` instead would say 332,000 for #391 and demand a
+        budget a third larger than anything real, because it assumes every item
+        sits at its cap and almost none do — the median review is 4,167 against
+        a cap of 8,000. The guard against a cap rising is the next test; this
+        one is against the BUDGET falling below observed reality.
+        """
+        assert prr.CONVERSATION_BUDGET >= 207_067, (
+            "the longest conversation measured does not fit; an author's oldest "
+            "replies would be dropped on exactly the PRs where re-raising hurts")
+
+    def test_turn_one_leaves_room_for_every_turn_the_loop_can_take(self, prr):
+        """THE TWO BUDGETS READ TOGETHER, which nothing did until the reviewer
+        asked on this PR.
+
+        `conversation()` lands in `{prior}`, so it is in the user message of
+        every pass and counts against `agent.MAX_TRANSCRIPT_CHARS`, past which
+        the loop is forced to answer — and `agent.py` records the cost of that:
+        "round 4 answered in 77 characters after reading every changed file".
+        Doubling the conversation budget spends the agent's room to READ.
+
+        The floor is provable rather than judged: the loop cannot generate more
+        than `MAX_TURNS x MAX_TOOL_CHARS` of tool results before it stops of its
+        own accord, so turn one must leave at least that much. The margin is
+        about 8,500 characters and four constants feed it, which is exactly why
+        this is pinned instead of reasoned about once.
+        """
+        from agentic_review import agent, config
+        turn_one = (len(prr.PROMPT)
+                    + prr.shown_diff_cap()            # what build_prompt gives the diff
+                    + prr.CONVERSATION_BUDGET)
+        can_read = agent.MAX_TRANSCRIPT_CHARS - turn_one
+        # THE MARKER COUNTS. `_truncate` appends its note AFTER the cut, so a
+        # clipped result is MAX_TOOL_CHARS plus the note — measured here rather
+        # than assumed, because assuming it is what made the comment claim a
+        # margin 5,200 characters larger than it has.
+        clipped = len(agent._truncate("x" * (agent.MAX_TOOL_CHARS + 10_000)))
+        assert clipped > agent.MAX_TOOL_CHARS, (
+            "if _truncate ever bounds itself, drop this and the comment with it")
+        needs = agent.MAX_TURNS * clipped
+        assert can_read >= needs, (
+            f"turn one is {turn_one:,} of {agent.MAX_TRANSCRIPT_CHARS:,}, leaving "
+            f"{can_read:,} for tool results — but {agent.MAX_TURNS} turns at "
+            f"{clipped:,} chars need {needs:,}. The agent would be "
+            f"forced to answer before it stopped reading.")
+
+    def test_the_caps_are_readable_from_the_env_file(self, tmp_path):
+        """`REVIEW_ENV_FILES` is how a self-hosted runner supplies everything —
+        an Actions step inherits `LANG` and little else — and it was wired only
+        to credentials. An operator putting the cap in the file their runner
+        already uses would silently have got the default.
+
+        A SUBPROCESS, BECAUSE THE IMPORT ORDER IS THE CLAIM. The first version
+        reloaded `agentic_review.env` and then exec'd a fresh copy of
+        `review.py`, which proves `env.get` can read the file but manufactures
+        the state it is testing: in production `review` is imported once and
+        `ITEM_CAPS` is evaluated at that moment, so the claim depends on
+        `env.FILES` already being populated when `review` is first imported.
+        That test would stay green if `ITEM_CAPS` moved above `from . import
+        env`, while the operator silently got the default. Raised by the
+        reviewer. A subprocess reproduces the real order and touches no module
+        this session shares.
+        """
+        f = tmp_path / "runner.env"
+        f.write_text("REVIEW_ITEM_CAP_COMMIT=20000\n")
+        e = {k: v for k, v in os.environ.items()
+             if not k.startswith("REVIEW_ITEM_CAP_")}
+        e["REVIEW_ENV_FILES"] = str(f)
+        e["PYTHONPATH"] = str(pathlib.Path(__file__).resolve().parents[1])
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "from agentic_review import review; print(review.ITEM_CAPS['commit'])"],
+            capture_output=True, text=True, env=e, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "20000", (out.stdout, out.stderr)
+
+    def test_no_single_kind_can_monopolise_the_budget(self, prr):
+        """THE HALF THAT READS THE CAPS, and the reason this pair exists.
+
+        The predecessor asserted `CONVERSATION_BUDGET >= 165_000` while its
+        docstring promised "both numbers move together" — so raising every cap
+        to 100,000, enough for four items to eat the budget and drop every older
+        reply, left it green. Proven before fixing: with the floor, blown caps
+        pass; with this, they fail.
+
+        19 rounds is the longest real PR. That many of the LARGEST item kind
+        must still fit, so a cap raised without the budget fails here.
+        """
+        rounds, biggest = 19, max(prr.ITEM_CAPS.values())
+        assert biggest * rounds <= prr.CONVERSATION_BUDGET, (
+            f"{rounds} items at the largest cap ({biggest:,}) is "
+            f"{biggest * rounds:,}, over the {prr.CONVERSATION_BUDGET:,} budget "
+            f"— raise the budget, or lower the cap")
+
+    def test_a_cut_item_stays_within_its_cap(self, prr):
+        """The marker counts against the cap.
+
+        Appended after the cut it made an 8,000 cap yield an 8,045-character
+        item — honest in the budget, which charges `len(text)`, but a constant
+        that does not mean what its name says. `test_a_long_commit_message_is_capped`
+        passes either way, so nothing pinned the boundary until this.
+        """
+        for kind, cap in prr.ITEM_CAPS.items():
+            for over in (1, 5, 1_000, 999_999):
+                out = prr._capped_item("x" * (cap + over), cap)
+                assert len(out) <= cap, (
+                    f"{kind}: cap {cap} produced {len(out)} chars")
+
+    def test_a_cap_too_small_for_the_marker_drops_the_marker(self, prr):
+        """Saying "cut" and showing nothing of what was cut is worse than the
+        silent cut the marker exists to replace, so the body wins the space."""
+        out = prr._capped_item("x" * 500, 10)
+        assert out == "x" * 10
+        assert "cut here" not in out
+
+    def test_the_caps_are_settable_from_the_environment(self, prr, monkeypatch):
+        """Every other budget here is — `REVIEW_CONVERSATION_BUDGET`,
+        `REVIEW_MAX_TRANSCRIPT`. An operator meeting a pathological item could
+        raise the budget and not the cap that was doing the cutting."""
+        # A THROWAWAY MODULE OBJECT. `importlib.reload(prr)` re-executes the
+        # file in the namespace every other test in the session holds a
+        # reference to, so this test would rebind module-level state for all of
+        # them and be correct only because a `finally` put it back — a
+        # correctness that no assertion here protects and that a moved line
+        # would quietly lose. Raised by the reviewer.
+        import importlib.util
+        monkeypatch.setenv("REVIEW_ITEM_CAP_REVIEW", "12345")
+        # A DOTTED NAME INSIDE THE PACKAGE, or the file's `from .errors import`
+        # has no package to resolve against and the exec dies on line 54.
+        spec = importlib.util.spec_from_file_location(
+            "agentic_review._cap_probe", prr.__file__)
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        assert probe.ITEM_CAPS["review"] == 12345
+        assert prr.ITEM_CAPS["review"] != 12345, (
+            "the shared module must be untouched by this test")
 
     def test_one_endpoint_failing_keeps_the_others(self, prr, monkeypatch):
         """Losing the whole conversation is what makes the tool repeat itself, so

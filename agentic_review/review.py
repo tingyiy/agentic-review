@@ -54,6 +54,7 @@ import urllib.request
 from . import agent
 from . import checks
 from . import context as ctx
+from . import env
 from . import github
 from . import llm
 from . import status
@@ -471,7 +472,161 @@ Reply with ONLY this JSON, no prose around it:
 #: How much prior conversation the reviewer is shown. Generous on purpose: the
 #: cost of forgetting is a reviewer that argues with its own earlier advice,
 #: which is worse than any token bill and is what a 12-item cap actually bought.
-CONVERSATION_BUDGET = int(os.environ.get("REVIEW_CONVERSATION_BUDGET", 120_000))
+#: What `build_prompt` lets the diff take, as ONE constant rather than the same
+#: expression written twice. The transcript floor below is arithmetic on this
+#: number, and `expand_hunks` is NOT bounded by it — its docstring says it
+#: returns the ORIGINAL diff when expanding would breach the cap, and that diff
+#: is bounded by `MAX_FILE_DIFF` (2 * MAX_DIFF), half again as large. `_capped`
+#: is what actually holds the line, so the floor depends on `_capped`'s limit
+#: and this constant being the same thing. Raised by the reviewer, whose point
+#: was that a margin of 8,560 characters should not rest on two literals
+#: agreeing.
+#:
+#: A FUNCTION, NOT A CONSTANT. Frozen at import it stopped tracking `MAX_DIFF`,
+#: and `test_the_prompt_itself_is_capped` — which patches `MAX_DIFF` to prove
+#: the cap sits at the CALL SITE rather than inside `expand_hunks` — went red.
+#: That test is there because a single big file reaching the model whole is what
+#: emptied the transcript on infra#180, and it caught this within the minute.
+def shown_diff_cap():
+    return int(MAX_DIFF * 1.6)
+
+#: AND WHAT IT SPENDS OF THE AGENT'S TRANSCRIPT, because nothing read the two
+#: together until the reviewer asked. `conversation()` lands in `{prior}`, so it
+#: is in the user message of every pass and counts against
+#: `agent.MAX_TRANSCRIPT_CHARS`, past which the loop is FORCED to answer — and
+#: `agent.py` records what that costs: "round 4 answered in 77 characters after
+#: reading every changed file".
+#:
+#:     instructions                                     5,440
+#:     expanded diff, capped (MAX_DIFF * 1.6)          96,000
+#:     conversation, at this ceiling                  250,000
+#:     ------------------------------------------------------
+#:     turn one, worst case                           351,440   59% of 600,000
+#:     left for tool results                          248,560
+#:
+#: PER PASS, NOT PER REVIEW. `prior` is built once and handed to `build_prompt`
+#: for every pass, so each of `MAX_PASSES` starts a fresh `agent.run` carrying
+#: the same conversation — the floor above holds for each of them separately,
+#: which is what matters, but the cost is paid that many times. `_look_again`
+#: and `_revise` RESUME a pass rather than starting one, and `agent.resume`
+#: deliberately allows `inherited + RESUME_HEADROOM`, past
+#: `MAX_TRANSCRIPT_CHARS`: a forced pass is at the budget by construction, so a
+#: resume sharing the absolute cap would be forced on turn 1 with zero tool
+#: calls (measured on caeli-marketing#212). Enlarging the conversation enlarges
+#: `inherited` and so that allowance too. That is the documented design, not a
+#: leak — noted here because this paragraph is where someone will come looking.
+#:
+#: THAT FLOOR IS PROVABLY ENOUGH: `MAX_TURNS` is 40 and `MAX_TOOL_CHARS` is
+#: 6,000, so the loop cannot generate more than 40 clipped tool results before
+#: it stops of its own accord. NOT 240,000 CHARACTERS, THOUGH — `agent._truncate`
+#: appends its "[... truncated: N more chars …]" note AFTER the cut, exactly the
+#: shape fixed in `_capped_item` one function over and not carried across, so a
+#: clipped result is `MAX_TOOL_CHARS` plus about 120. Forty of them is ~245,200
+#: and the real margin is ~3,360, not the 8,560 this paragraph used to claim.
+#: It still clears, and the test now computes the need with the marker included
+#: rather than restating a number that was quietly optimistic. Raised by the
+#: reviewer.
+#:
+#: The transcript budget is NOT raised to buy more room. Its own comment says
+#: raising it "should be paid for by a measurement, not by the fact that the
+#: model would allow it", and every turn re-sends the transcript, so a longer
+#: one costs more than linearly across a loop.
+CONVERSATION_BUDGET = int(env.get("REVIEW_CONVERSATION_BUDGET") or 250_000)
+
+#: How much of ONE item is shown, by kind. These are a guard against a
+#: pathological reply — the 62,451-character looping one is on record — and NOT
+#: a budget. The budget is above, and it is the thing that should bind.
+#:
+#: IT DID NOT. When the 12-ITEM cap became a 120,000-CHARACTER budget, these
+#: were left at the values that made sense while only twelve items got through,
+#: and the constraint silently moved from "how many items" to "how much of each
+#: item". MEASURED over 24 closed pull requests in four repositories, against
+#: the old caps of 1,200 / 800 / 800 / 1,500:
+#:
+#:     kind        n   median    p90     max   truncated   of text SHOWN
+#:     review     60     4,167  7,137  10,706         83%             27%
+#:     comment    63     1,100  1,817   2,317         70%             64%
+#:     commit     77       507  1,643   3,992         10%             89%
+#:     inline     87       340    460     614          0%            100%
+#:
+#: INLINE WAS NEVER THE PROBLEM, and it is the one number here not chosen from
+#: a breach. 87 inline replies across 185 pull requests in nine repositories:
+#: the longest was 614 characters and the OLD 800 cap already showed all of
+#: them. It is raised anyway, to 3,000, for the same reason as the rest — these
+#: are a guard against a pathological item, not a budget, and 87 samples do not
+#: prove the next one is short. That is headroom, not a measurement, and saying
+#: so is the point of this paragraph. (Asked for by the reviewer on the PR that
+#: set it: the guard test below could not fail for the one kind whose value had
+#: nothing behind it.)
+#:
+#: The reviewer was shown 27% OF WHAT IT HAD ITSELF SAID. That is the mechanism
+#: behind "it re-raises a point I already answered": not that it ignores the
+#: reply, but that it reads four endpoints and then throws most of them away. On
+#: caeli-marketing#391 all 21 author rebuttals were over the comment cap; the cut
+#: on the one disputing a finding landed mid-sentence, just before the paragraph
+#: naming the mechanism, and the point came back three more times.
+#:
+#: Set past p90 so the budget limits and these do not. A 3-5 round PR carries
+#: ~27,000 characters and never reaches either number; a 19-round one carries
+#: ~165,000 and fits. The cost lands only on long contested PRs, which is where
+#: the failure was.
+#:
+#: BOTH NUMBERS MOVE TOGETHER OR NEITHER DOES. The budget fills newest-first, so
+#: raising these alone would spend it on our own verbose reviews and push the
+#: author's replies out — the exact opposite of the point.
+#: READ FROM THE ENVIRONMENT, like `CONVERSATION_BUDGET` above and
+#: `MAX_TRANSCRIPT_CHARS` in the agent — and READ AT IMPORT, like both of them,
+#: so changing one needs a restart. That is the whole claim. An earlier version
+#: of this comment said it let "an operator meeting a pathological item raise
+#: the cap that was doing the cutting", which is not true of any of the three:
+#: the run that met the item is already over. What it buys is that an adopter
+#: tuning this reviewer can set every budget the same way, instead of finding
+#: that the one doing the cutting is the one they have to fork the code to move.
+#: THROUGH `env.get`, NOT `os.environ`, so `REVIEW_ENV_FILES` reaches them.
+#: That file is how a self-hosted runner supplies everything else — an Actions
+#: step inherits `LANG` and little else — and it was wired only to credentials.
+#: An operator putting `REVIEW_ITEM_CAP_REVIEW=20000` in the env file their
+#: runner already uses would have silently got 8,000. Raised by the reviewer.
+#: `CONVERSATION_BUDGET` above goes the same way; `MAX_DIFF` and
+#: `MAX_TRANSCRIPT_CHARS` still read `os.environ` directly and are left alone
+#: here rather than half-migrated in a PR about the conversation.
+ITEM_CAPS = {kind: int(env.get(f"REVIEW_ITEM_CAP_{kind.upper()}") or default)
+             for kind, default in (("review", 8_000), ("inline", 3_000),
+                                   ("comment", 3_000), ("commit", 4_000))}
+
+
+def _capped_item(body, cap):
+    """Cut an over-long conversation item, and SAY SO where it was cut.
+
+    A silent cut hands the model half a sentence as if it were a whole thought.
+    These caps are now a guard against a pathological reply rather than a
+    budget, so one firing is unusual and the model should know it happened —
+    the same reason the block below says when the history itself is incomplete.
+    Half a rebuttal read as a complete one is exactly how an answered point
+    comes back.
+    """
+    if len(body) <= cap:
+        return body
+    # THE MARKER COUNTS AGAINST THE CAP. Appending it after the cut made
+    # `ITEM_CAPS["review"] = 8_000` produce an 8,045-character item — honest in
+    # the budget, which charges `len(text)`, but a constant that does not mean
+    # what its name says. Room is reserved for it instead.
+    #
+    # Two passes, because the reserved room changes the remainder and the
+    # remainder can gain a digit. It converges immediately; the loop is the
+    # proof, not an expectation of many rounds.
+    keep = cap
+    for _ in range(4):
+        marker = f"\n[… cut here: {len(body) - keep:,} more characters]"
+        if keep + len(marker) <= cap:
+            break
+        keep = cap - len(marker)
+        if keep <= 0:
+            # A cap too small to hold the marker AND any text. Saying "cut" and
+            # showing nothing of what was cut is worse than the silent cut this
+            # marker exists to replace, so the body wins the space.
+            return body[:cap]
+    return body[:keep] + marker
 
 
 def conversation(repo, pr):
@@ -495,7 +650,7 @@ def conversation(repo, pr):
     # four measurements") lived in a commit message, and this function returned
     # an empty conversation on every round. The block below then told the model
     # not to repeat itself while showing it nothing it had already been told.
-    items, cut_short = [], False
+    items, cut_short, cut_read = [], False, 0
     for path, kind, cap in (
         # `per_page=100` ON ALL FOUR. Three of these were left at GitHub's
         # default of 30 because "they never exceed it" — but the default returns
@@ -504,10 +659,10 @@ def conversation(repo, pr):
         # PAGED, not merely `per_page=100`: these return OLDEST first, so on a
         # contested PR the rebuttal this block exists to show is on the LAST
         # page. Raising 30 to 100 moved that cliff rather than removing it.
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/reviews", "review", 1200),
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/comments", "inline", 800),
-        (f"/repos/{ORG}/{repo}/issues/{pr}/comments", "comment", 800),
-        (f"/repos/{ORG}/{repo}/pulls/{pr}/commits", "commit", 1500),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/reviews", "review", ITEM_CAPS["review"]),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/comments", "inline", ITEM_CAPS["inline"]),
+        (f"/repos/{ORG}/{repo}/issues/{pr}/comments", "comment", ITEM_CAPS["comment"]),
+        (f"/repos/{ORG}/{repo}/pulls/{pr}/commits", "commit", ITEM_CAPS["commit"]),
     ):
         try:
             page = _paged(path)
@@ -531,7 +686,9 @@ def conversation(repo, pr):
                            or (c.get("author") or {}).get("login") or "?")
                     when = (detail.get("author") or {}).get("date") or ""
                     if body:
-                        items.append((when, f"[{who} — commit]\n{body[:cap]}"))
+                        cut_read += len(body) > cap
+                        items.append((when, f"[{who} — commit]\n{_capped_item(body, cap)}",
+                                      len(body) > cap))
                     continue
                 body = (c.get("body") or "").strip()
                 if not body:
@@ -549,8 +706,10 @@ def conversation(repo, pr):
                 # commit answering it end up in different halves of the text.
                 # The comment endpoints carry no `submitted_at`, so the chain
                 # is safe for them.
+                cut_read += len(body) > cap
                 items.append((c.get("submitted_at") or c.get("created_at") or "",
-                              f"[{who} — {tag}{where}]\n{body[:cap]}"))
+                              f"[{who} — {tag}{where}]\n{_capped_item(body, cap)}",
+                              len(body) > cap))
         except Exception as e:
             # One endpoint failing must not discard the other two — losing the
             # whole conversation is what makes the tool repeat itself.
@@ -572,16 +731,64 @@ def conversation(repo, pr):
     # oldest — then re-sorted into order, because an argument reads forwards and
     # a finding must sit next to the commit that answered it.
     chosen, used = [], 0
-    for stamp, text in sorted(items, key=lambda x: x[0], reverse=True):
+    for stamp, text, was_cut in sorted(items, key=lambda x: x[0], reverse=True):
         if used + len(text) > CONVERSATION_BUDGET and chosen:
             break
-        chosen.append((stamp, text))
+        chosen.append((stamp, text, was_cut))
         used += len(text)
     dropped = len(items) - len(chosen)
-    out = [text for _, text in sorted(chosen, key=lambda x: x[0])]
-    if dropped:
-        print(f"  conversation: {len(chosen)} of {len(items)} items "
-              f"({used:,} chars); {dropped} older item(s) dropped", flush=True)
+    out = [text for _, text, _ in sorted(chosen, key=lambda x: x[0])]
+    # TWO POPULATIONS, BECAUSE ONE NUMBER CANNOT CARRY BOTH FACTS, and trying
+    # to make it took three review rounds going in a circle.
+    #
+    #   cut_read  — caps that FIRED, over everything read. The operator signal:
+    #               a cap that did not take (`REVIEW_ITEM_CAP_REVIEWS`, plural)
+    #               shows up here and nowhere else.
+    #   cut_kept  — cuts in what the model is actually handed.
+    #
+    # Counting only the second went silent when the pathological item was old
+    # enough for the budget to drop it — exactly the case the line exists to
+    # catch. Counting only the first says "cut" about items nobody saw. Both are
+    # printed, and the second only when it differs, so neither claim is made of
+    # the other's population.
+    # CARRIED, NOT INFERRED FROM THE TEXT. `sum("[… cut here:" in text ...)`
+    # counted any item whose body merely QUOTES the marker — this repository's
+    # own source does, and so does every PR that discusses this code, including
+    # the one that introduced the line. A conversation in which nothing was cut
+    # would then print "(M of them kept)" with M below N, corrupting the single
+    # signal the clause exists to carry. `_capped_item`'s decision is recorded
+    # where it is made.
+    cut_kept = sum(was_cut for _, _, was_cut in chosen)
+    # SAY WHEN A CAP BITES, not what the caps are set to. A cap firing is
+    # unusual — every kind is set past its measured p90 — so one that fires is
+    # either a genuinely pathological item or a cap that did not take. The
+    # second is easy to produce: `ITEM_CAPS` builds its keys from a fixed tuple,
+    # so `REVIEW_ITEM_CAP_REVIEWS` (plural — the endpoint is `/reviews`) is
+    # accepted by `os.environ.get` and silently ignored, and on a self-hosted
+    # runner the only feedback is a review that still cuts. Echoing the resolved
+    # config would answer that too, but the effect is the thing worth a line:
+    # it is also true when the cap is right and the item is enormous.
+    #
+    # AND WHEN THE PAGING FUSE BIT. That is the one incompleteness the caps
+    # cannot explain — the newest items never arrived at all — and it is the
+    # case this summary was silent for, because nothing was over a cap and
+    # nothing was dropped. `_paged` prints its own line, but it names an
+    # endpoint path rather than the conversation. Raised by the reviewer.
+    if dropped or cut_read or cut_short:
+        parts = [f"{len(chosen)} of {len(items)} items ({used:,} chars)"]
+        if cut_read:
+            # NOT "shown": this function returns a block that `main`
+            # concatenates and interpolates two thousand lines away, so what
+            # the model finally sees is not a claim `conversation()` can make.
+            clause = f"{cut_read} item(s) over their cap and cut"
+            if cut_kept != cut_read:
+                clause += f" ({cut_kept} of them kept)"
+            parts.append(clause)
+        if dropped:
+            parts.append(f"{dropped} older item(s) dropped")
+        if cut_short:
+            parts.append("history INCOMPLETE — a paging fuse bit, newest items missing")
+        print("  conversation: " + "; ".join(parts), flush=True)
     if not out:
         # AN EMPTY HISTORY AND AN EMPTY-BUT-TRUNCATED ONE ARE NOT THE SAME.
         # Every surviving item can have an empty body (bare APPROVEs) while the
@@ -877,8 +1084,8 @@ def build_prompt(repo, work, part, caveats="", context="", prior=""):
     prompt — so nothing downstream of `pr_diff` was guarding what actually
     reaches the model.
     """
-    shown = _capped(ctx.expand_hunks(part, work, max_chars=int(MAX_DIFF * 1.6)),
-                    int(MAX_DIFF * 1.6))
+    cap = shown_diff_cap()
+    shown = _capped(ctx.expand_hunks(part, work, max_chars=cap), cap)
     prompt = PROMPT.format(repo=repo, path=work, diff=shown, caveats=caveats,
                            context=context, prior=prior)
     return prompt, shown
