@@ -534,7 +534,12 @@ class TestConversation:
         """Set past p90 so the BUDGET limits and these do not. If a cap ever
         drops back under the real distribution it silently becomes the
         constraint again, which is the whole bug."""
-        p90 = {"review": 7_137, "comment": 1_817, "commit": 1_643, "inline": 460}
+        # REVIEW'S p90 IS PER REPOSITORY, 9,765 (slack-app, n=60), not the
+        # pooled 7,137 this shipped with. Pooling four repositories put the
+        # figure below the one repository whose reviews are long, and the cap
+        # only ever binds there — 15 of 16 reviews on one payment PR were over
+        # the 8,000 that p90 justified.
+        p90 = {"review": 9_765, "comment": 1_817, "commit": 1_643, "inline": 460}
         assert set(p90) == set(prr.ITEM_CAPS), (
             "every cap needs a measurement behind it — a kind missing from this "
             "dict is a kind this guard silently cannot protect, which is how "
@@ -543,26 +548,52 @@ class TestConversation:
             assert prr.ITEM_CAPS[kind] > seen, (
                 f"{kind} cap {prr.ITEM_CAPS[kind]} is under the measured p90 {seen}")
 
+    #: The caps the 212,187 figure below was measured at. If a cap moves, the
+    #: measurement is stale and the guard silently stops describing anything —
+    #: which is what happened when the review cap went 8,000 -> 13,000 and the
+    #: constant stayed at the 8,000 total. Raised by the reviewer.
+    MEASURED_AT = {"review": 13_000, "inline": 3_000, "comment": 3_000,
+                   "commit": 4_000}
+
     def test_the_budget_holds_the_worst_conversation_measured(self, prr):
-        """ALL FOUR ENDPOINTS, not the two I first counted.
+        """ALL FOUR ENDPOINTS, at the caps named in `MEASURED_AT`.
 
         The budget fills from the union of reviews, inline replies, issue
-        comments and commit messages. The first version of this guard summed
-        review + comment only, which under-counted the population it guards —
-        commits were a THIRD of the items on the PR this change is named for.
-        Raised by the reviewer; measured rather than argued, both longest PRs,
-        every endpoint, at the current caps:
+        comments and commit messages. An earlier version summed review +
+        comment only, which under-counted the population it guards — commits
+        were a THIRD of the items on the PR this was named for. Measured rather
+        than argued, both longest PRs, every endpoint:
 
-            #391   21 reviews,  0 inline, 22 comments, 20 commits -> 207,067
-            #212   20 reviews,  6 inline, 17 comments, 21 commits -> 140,963
+            #391   21 reviews,  0 inline, 22 comments, 20 commits -> 212,187
+            #518   16 reviews,  0 inline, 17 comments, 19 commits -> 205,412
 
         Counting `items x cap` instead would say 332,000 for #391 and demand a
-        budget a third larger than anything real, because it assumes every item
-        sits at its cap and almost none do — the median review is 4,167 against
-        a cap of 8,000. The guard against a cap rising is the next test; this
-        one is against the BUDGET falling below observed reality.
+        budget half again larger than anything real, because it assumes every
+        item sits at its cap and almost none do. The guard against a cap rising
+        is the next test; this one is against the BUDGET falling below observed
+        reality.
         """
-        assert prr.CONVERSATION_BUDGET >= 207_067, (
+        # THE DEFAULTS, NOT THE RESOLVED CAPS. `env.get` reads `os.environ`
+        # first, so comparing the resolved values turned a documented override
+        # — `REVIEW_ITEM_CAP_REVIEW=20000`, which the README lists and
+        # `test_the_caps_are_settable_from_the_environment` proves works — into
+        # a red suite blaming a source change that had not happened. Raised by
+        # the reviewer on the commit that added this guard.
+        # THE MESSAGE NAMES BOTH LITERALS ON PURPOSE. The cheap way to silence
+        # this guard is to update `MEASURED_AT` and stop reading, which leaves
+        # `212_187` describing the old caps — the exact drift the guard exists
+        # to stop, reintroduced by the person it just warned. Raised by the
+        # reviewer, which could not make it produce a wrong review and was
+        # right that it is only a wording risk; a guard whose whole value is
+        # what the reader does next cannot afford to misdirect them.
+        assert prr.ITEM_CAP_DEFAULTS == self.MEASURED_AT, (
+            f"cap defaults moved to {prr.ITEM_CAP_DEFAULTS}, but this test still "
+            f"assumes {self.MEASURED_AT}. TWO literals move together: re-sum "
+            f"caeli-marketing#391 and slack-app#518 over all four endpoints at "
+            f"the new caps, then update BOTH `MEASURED_AT` above AND the "
+            f"212,187 in the next assertion. Updating only MEASURED_AT silences "
+            f"this and leaves the floor describing the old caps.")
+        assert prr.CONVERSATION_BUDGET >= 212_187, (
             "the longest conversation measured does not fit; an author's oldest "
             "replies would be dropped on exactly the PRs where re-raising hurts")
 
@@ -626,10 +657,15 @@ class TestConversation:
         e["PYTHONPATH"] = str(pathlib.Path(__file__).resolve().parents[1])
         out = subprocess.run(
             [sys.executable, "-c",
-             "from agentic_review import review; print(review.ITEM_CAPS['commit'])"],
+             "from agentic_review import review as r; "
+             "print(r.ITEM_CAPS['commit'], r.ITEM_CAP_DEFAULTS['commit'])"],
             capture_output=True, text=True, env=e, timeout=60)
         assert out.returncode == 0, out.stderr
-        assert out.stdout.strip() == "20000", (out.stdout, out.stderr)
+        # AND THE DEFAULTS ARE UNTOUCHED BY IT. The measured-floor guard reads
+        # `ITEM_CAP_DEFAULTS`, so if an override leaked into it, a documented
+        # override would red the suite and blame a source change that never
+        # happened — which it did, for one commit.
+        assert out.stdout.split() == ["20000", "4000"], (out.stdout, out.stderr)
 
     def test_no_single_kind_can_monopolise_the_budget(self, prr):
         """THE HALF THAT READS THE CAPS, and the reason this pair exists.

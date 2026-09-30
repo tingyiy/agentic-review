@@ -64,11 +64,27 @@ measured the gap. Over 24 closed pull requests in four repositories:
 
 ```
 kind        n   median    p90     max   truncated   of text SHOWN
-review     60    4,167  7,137  10,706         83%             27%
+review     60    4,167  7,137  10,706         83%             27%   (pooled; see below)
 comment    63    1,100  1,817   2,317         70%             64%
 commit     77      507  1,643   3,992         10%             89%
 inline     87      340    460     614          0%            100%
 ```
+
+**The review figure above is pooled across repositories, and that was a
+mistake.** Re-measured per repository over 92 reviews, one repository's reviews
+are nearly twice another's, and the cap only ever binds on the longer ones:
+
+```
+repo          n   median    p90     max   shown@8k   shown@13k
+A            60    4,293  9,765  14,277        91%         99%
+B            32    2,665  5,075   6,800       100%        100%
+```
+
+On a 16-round pull request with 121 findings the median review was 12,609 and
+fifteen of sixteen were over 8,000 — 69% of its own prior text. The review cap
+is 13,000. The budget guard's actual ceiling is 13,157 (`250,000 / 19`); 13,000
+is the round number under it, and the budget cannot rise to allow more because
+the transcript floor caps it at 254,600.
 
 Inline replies are the exception and are reported for honesty: 87 of them
 across 185 pull requests, the longest 614 characters, all of which the old cap
@@ -150,7 +166,7 @@ default:
 | `REVIEW_ALERT_COMMAND` | *(unset)* | shell command that receives failures on stdin |
 | `REVIEW_STATUS_CONTEXT` | `agentic-review` | the commit status the reviewer sets on the PR head (pending → verdict) |
 | `REVIEW_CONVERSATION_BUDGET` | `250000` | characters of prior conversation the reviewer is shown, newest first. It shares the agent's transcript budget with the diff, so raising it spends the agent's room to read |
-| `REVIEW_ITEM_CAP_REVIEW` | `8000` | most of one past review it is shown; a guard against a pathological reply, not a budget |
+| `REVIEW_ITEM_CAP_REVIEW` | `13000` | most of one past review it is shown; a guard against a pathological reply, not a budget |
 | `REVIEW_ITEM_CAP_COMMENT` | `3000` | the same, for an issue comment |
 | `REVIEW_ITEM_CAP_INLINE` | `3000` | the same, for an inline reply |
 | `REVIEW_ITEM_CAP_COMMIT` | `4000` | the same, for a commit message |
