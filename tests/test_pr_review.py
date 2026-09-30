@@ -579,11 +579,20 @@ class TestConversation:
         # `test_the_caps_are_settable_from_the_environment` proves works — into
         # a red suite blaming a source change that had not happened. Raised by
         # the reviewer on the commit that added this guard.
+        # THE MESSAGE NAMES BOTH LITERALS ON PURPOSE. The cheap way to silence
+        # this guard is to update `MEASURED_AT` and stop reading, which leaves
+        # `212_187` describing the old caps — the exact drift the guard exists
+        # to stop, reintroduced by the person it just warned. Raised by the
+        # reviewer, which could not make it produce a wrong review and was
+        # right that it is only a wording risk; a guard whose whole value is
+        # what the reader does next cannot afford to misdirect them.
         assert prr.ITEM_CAP_DEFAULTS == self.MEASURED_AT, (
-            f"cap defaults moved to {prr.ITEM_CAP_DEFAULTS} — the 212,187 below "
-            f"was measured at "
-            f"{self.MEASURED_AT} and no longer describes any conversation. "
-            f"Re-sum the two PRs at the new caps and update both.")
+            f"cap defaults moved to {prr.ITEM_CAP_DEFAULTS}, but this test still "
+            f"assumes {self.MEASURED_AT}. TWO literals move together: re-sum "
+            f"caeli-marketing#391 and slack-app#518 over all four endpoints at "
+            f"the new caps, then update BOTH `MEASURED_AT` above AND the "
+            f"212,187 in the next assertion. Updating only MEASURED_AT silences "
+            f"this and leaves the floor describing the old caps.")
         assert prr.CONVERSATION_BUDGET >= 212_187, (
             "the longest conversation measured does not fit; an author's oldest "
             "replies would be dropped on exactly the PRs where re-raising hurts")
