@@ -590,8 +590,30 @@ CONVERSATION_BUDGET = int(env.get("REVIEW_CONVERSATION_BUDGET") or 250_000)
 #: `CONVERSATION_BUDGET` above goes the same way; `MAX_DIFF` and
 #: `MAX_TRANSCRIPT_CHARS` still read `os.environ` directly and are left alone
 #: here rather than half-migrated in a PR about the conversation.
+#: REVIEW IS 13,000 BECAUSE 8,000 WAS SET FROM A POOLED p90, AND POOLING WAS
+#: THE ORIGINAL MISTAKE HERE. 8,000 came from p90 = 7,137 over 24 pull requests
+#: with four repositories' reviews in one bucket. Re-measured per repository
+#: over 92 bot reviews:
+#:
+#:     repo          n   median    p90     max   shown@8k   shown@13k
+#:     slack-app    60    4,293  9,765  14,277        91%         99%
+#:     infra        32    2,665  5,075   6,800       100%        100%
+#:
+#: The pooled figure is dominated by short reviews on quiet pull requests, and
+#: the cap only ever binds on the loud ones. On the pull request that prompted
+#: this — 16 rounds, 121 findings, 7.6 per round on payment code — the median
+#: review was 12,609 and FIFTEEN OF SIXTEEN were over 8,000: 69% of its own
+#: prior text. At 13,000 that is 98%, and the conversation is 205,412 of the
+#: 250,000 budget.
+#:
+#: 13,000 IS THE CEILING, NOT A PREFERENCE. `test_no_single_kind_can_monopolise
+#: _the_budget` requires 19 x cap <= CONVERSATION_BUDGET, so the largest legal
+#: value is 13,157; and the budget itself cannot rise to make room, because the
+#: transcript floor caps it at 254,600 against today's 250,000. Wanting more
+#: than this means moving `MAX_TRANSCRIPT_CHARS`, which its own comment says
+#: must be paid for by a measurement.
 ITEM_CAPS = {kind: int(env.get(f"REVIEW_ITEM_CAP_{kind.upper()}") or default)
-             for kind, default in (("review", 8_000), ("inline", 3_000),
+             for kind, default in (("review", 13_000), ("inline", 3_000),
                                    ("comment", 3_000), ("commit", 4_000))}
 
 

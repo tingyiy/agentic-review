@@ -64,11 +64,25 @@ measured the gap. Over 24 closed pull requests in four repositories:
 
 ```
 kind        n   median    p90     max   truncated   of text SHOWN
-review     60    4,167  7,137  10,706         83%             27%
+review     60    4,167  7,137  10,706         83%             27%   (pooled; see below)
 comment    63    1,100  1,817   2,317         70%             64%
 commit     77      507  1,643   3,992         10%             89%
 inline     87      340    460     614          0%            100%
 ```
+
+**The review figure above is pooled across repositories, and that was a
+mistake.** Re-measured per repository over 92 reviews, one repository's reviews
+are nearly twice another's, and the cap only ever binds on the longer ones:
+
+```
+repo          n   median    p90     max   shown@8k   shown@13k
+A            60    4,293  9,765  14,277        91%         99%
+B            32    2,665  5,075   6,800       100%        100%
+```
+
+On a 16-round pull request with 121 findings the median review was 12,609 and
+fifteen of sixteen were over 8,000 — 69% of its own prior text. The review cap
+is 13,000, which is the largest value the budget guard permits.
 
 Inline replies are the exception and are reported for honesty: 87 of them
 across 185 pull requests, the longest 614 characters, all of which the old cap

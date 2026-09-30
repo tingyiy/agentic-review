@@ -534,7 +534,12 @@ class TestConversation:
         """Set past p90 so the BUDGET limits and these do not. If a cap ever
         drops back under the real distribution it silently becomes the
         constraint again, which is the whole bug."""
-        p90 = {"review": 7_137, "comment": 1_817, "commit": 1_643, "inline": 460}
+        # REVIEW'S p90 IS PER REPOSITORY, 9,765 (slack-app, n=60), not the
+        # pooled 7,137 this shipped with. Pooling four repositories put the
+        # figure below the one repository whose reviews are long, and the cap
+        # only ever binds there — 15 of 16 reviews on one payment PR were over
+        # the 8,000 that p90 justified.
+        p90 = {"review": 9_765, "comment": 1_817, "commit": 1_643, "inline": 460}
         assert set(p90) == set(prr.ITEM_CAPS), (
             "every cap needs a measurement behind it — a kind missing from this "
             "dict is a kind this guard silently cannot protect, which is how "
