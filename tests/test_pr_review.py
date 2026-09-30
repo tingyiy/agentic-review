@@ -548,26 +548,36 @@ class TestConversation:
             assert prr.ITEM_CAPS[kind] > seen, (
                 f"{kind} cap {prr.ITEM_CAPS[kind]} is under the measured p90 {seen}")
 
+    #: The caps the 212,187 figure below was measured at. If a cap moves, the
+    #: measurement is stale and the guard silently stops describing anything —
+    #: which is what happened when the review cap went 8,000 -> 13,000 and the
+    #: constant stayed at the 8,000 total. Raised by the reviewer.
+    MEASURED_AT = {"review": 13_000, "inline": 3_000, "comment": 3_000,
+                   "commit": 4_000}
+
     def test_the_budget_holds_the_worst_conversation_measured(self, prr):
-        """ALL FOUR ENDPOINTS, not the two I first counted.
+        """ALL FOUR ENDPOINTS, at the caps named in `MEASURED_AT`.
 
         The budget fills from the union of reviews, inline replies, issue
-        comments and commit messages. The first version of this guard summed
-        review + comment only, which under-counted the population it guards —
-        commits were a THIRD of the items on the PR this change is named for.
-        Raised by the reviewer; measured rather than argued, both longest PRs,
-        every endpoint, at the current caps:
+        comments and commit messages. An earlier version summed review +
+        comment only, which under-counted the population it guards — commits
+        were a THIRD of the items on the PR this was named for. Measured rather
+        than argued, both longest PRs, every endpoint:
 
-            #391   21 reviews,  0 inline, 22 comments, 20 commits -> 207,067
-            #212   20 reviews,  6 inline, 17 comments, 21 commits -> 140,963
+            #391   21 reviews,  0 inline, 22 comments, 20 commits -> 212,187
+            #518   16 reviews,  0 inline, 17 comments, 19 commits -> 205,412
 
         Counting `items x cap` instead would say 332,000 for #391 and demand a
-        budget a third larger than anything real, because it assumes every item
-        sits at its cap and almost none do — the median review is 4,167 against
-        a cap of 8,000. The guard against a cap rising is the next test; this
-        one is against the BUDGET falling below observed reality.
+        budget half again larger than anything real, because it assumes every
+        item sits at its cap and almost none do. The guard against a cap rising
+        is the next test; this one is against the BUDGET falling below observed
+        reality.
         """
-        assert prr.CONVERSATION_BUDGET >= 207_067, (
+        assert prr.ITEM_CAPS == self.MEASURED_AT, (
+            f"caps moved to {prr.ITEM_CAPS} — the 212,187 below was measured at "
+            f"{self.MEASURED_AT} and no longer describes any conversation. "
+            f"Re-sum the two PRs at the new caps and update both.")
+        assert prr.CONVERSATION_BUDGET >= 212_187, (
             "the longest conversation measured does not fit; an author's oldest "
             "replies would be dropped on exactly the PRs where re-raising hurts")
 
