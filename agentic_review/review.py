@@ -612,9 +612,17 @@ CONVERSATION_BUDGET = int(env.get("REVIEW_CONVERSATION_BUDGET") or 250_000)
 #: transcript floor caps it at 254,600 against today's 250,000. Wanting more
 #: than this means moving `MAX_TRANSCRIPT_CHARS`, which its own comment says
 #: must be paid for by a measurement.
+#: NAMED SEPARATELY FROM THE RESOLVED CAPS, because the measurement that
+#: justifies them is about these numbers and not about whatever an operator
+#: exported. A test comparing the RESOLVED caps to the measured ones went red
+#: on any box with `REVIEW_ITEM_CAP_REVIEW` set — a documented, supported
+#: override — and told the reader to re-measure two pull requests that were
+#: still correct.
+ITEM_CAP_DEFAULTS = {"review": 13_000, "inline": 3_000,
+                     "comment": 3_000, "commit": 4_000}
+
 ITEM_CAPS = {kind: int(env.get(f"REVIEW_ITEM_CAP_{kind.upper()}") or default)
-             for kind, default in (("review", 13_000), ("inline", 3_000),
-                                   ("comment", 3_000), ("commit", 4_000))}
+             for kind, default in ITEM_CAP_DEFAULTS.items()}
 
 
 def _capped_item(body, cap):

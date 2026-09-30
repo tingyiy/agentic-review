@@ -573,8 +573,15 @@ class TestConversation:
         is the next test; this one is against the BUDGET falling below observed
         reality.
         """
-        assert prr.ITEM_CAPS == self.MEASURED_AT, (
-            f"caps moved to {prr.ITEM_CAPS} — the 212,187 below was measured at "
+        # THE DEFAULTS, NOT THE RESOLVED CAPS. `env.get` reads `os.environ`
+        # first, so comparing the resolved values turned a documented override
+        # — `REVIEW_ITEM_CAP_REVIEW=20000`, which the README lists and
+        # `test_the_caps_are_settable_from_the_environment` proves works — into
+        # a red suite blaming a source change that had not happened. Raised by
+        # the reviewer on the commit that added this guard.
+        assert prr.ITEM_CAP_DEFAULTS == self.MEASURED_AT, (
+            f"cap defaults moved to {prr.ITEM_CAP_DEFAULTS} — the 212,187 below "
+            f"was measured at "
             f"{self.MEASURED_AT} and no longer describes any conversation. "
             f"Re-sum the two PRs at the new caps and update both.")
         assert prr.CONVERSATION_BUDGET >= 212_187, (
@@ -641,10 +648,15 @@ class TestConversation:
         e["PYTHONPATH"] = str(pathlib.Path(__file__).resolve().parents[1])
         out = subprocess.run(
             [sys.executable, "-c",
-             "from agentic_review import review; print(review.ITEM_CAPS['commit'])"],
+             "from agentic_review import review as r; "
+             "print(r.ITEM_CAPS['commit'], r.ITEM_CAP_DEFAULTS['commit'])"],
             capture_output=True, text=True, env=e, timeout=60)
         assert out.returncode == 0, out.stderr
-        assert out.stdout.strip() == "20000", (out.stdout, out.stderr)
+        # AND THE DEFAULTS ARE UNTOUCHED BY IT. The measured-floor guard reads
+        # `ITEM_CAP_DEFAULTS`, so if an override leaked into it, a documented
+        # override would red the suite and blame a source change that never
+        # happened — which it did, for one commit.
+        assert out.stdout.split() == ["20000", "4000"], (out.stdout, out.stderr)
 
     def test_no_single_kind_can_monopolise_the_budget(self, prr):
         """THE HALF THAT READS THE CAPS, and the reason this pair exists.
