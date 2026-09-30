@@ -53,8 +53,15 @@ class _Harness:
         monkeypatch.setattr(pr, "_revise",
                             lambda f, w, r: (seen["revised"].append(list(f)) or (f, [])))
         monkeypatch.setattr(pr.checks, "run_all", lambda *a, **k: [])
-        monkeypatch.setattr(pr, "post_review",
-                            lambda *a, **k: seen.setdefault("posted", a[3]) and "COMMENT")
+        def post_review(*a, **k):
+            # THE KWARGS TOO. `unread` and `pr_files` are built HERE, in main,
+            # and only forwarded by `post_review` — the seam that produced "the
+            # dismissal saw an EMPTY unread set". Recording them lets a test
+            # assert what actually reaches the guard.
+            seen["post_kwargs"] = dict(k)
+            seen.setdefault("posted", a[3])
+            return "COMMENT"
+        monkeypatch.setattr(pr, "post_review", post_review)
         monkeypatch.setattr(pr, "_pr_is_gone", lambda *a: None)
         if deadline is not None:
             monkeypatch.setattr(pr, "PASS_DEADLINE", deadline)
@@ -62,6 +69,46 @@ class _Harness:
         monkeypatch.delenv("DRY", raising=False)
         pr.main()
         return seen
+
+
+
+class TestWhatMainHandsTheDismissalGuard:
+    """`unread` and `pr_files` are built in `main` and only forwarded.
+
+    Every test of the narrowed guard calls `_dismiss_stale_block` directly with
+    both handed in, so a change to what `main` passes would leave them all
+    green — and that seam is exactly where "the dismissal saw an EMPTY unread
+    set" came from. Raised by the reviewer on the PR that narrowed the guard.
+    """
+
+    def test_an_excluded_file_reaches_the_guard_as_unread(self, monkeypatch):
+        seen = _Harness().run(monkeypatch, _blob("a.py"), [],
+                              excluded=["data/huge.jsonl"])
+        assert "data/huge.jsonl" in seen["post_kwargs"]["unread"], seen["post_kwargs"]
+
+    def test_truncated_means_NEVER_SHOWN_not_MORE_THAN_ONE_PASS(self, monkeypatch):
+        """Measured here, because I guessed it the other way round first.
+
+        An excluded file makes the run truncated even though it is a single
+        pass; four overflow passes do NOT, because multi-pass covers them. The
+        flag answers "was something never shown", and the dismissal guard leans
+        on it — `truncated and not cited` refuses a block naming no file — so
+        reading it as "did this take several passes" gets that backwards.
+        """
+        excluded_one_pass = _Harness().run(
+            monkeypatch, _blob("a.py"), [], excluded=["data/huge.jsonl"])
+        assert excluded_one_pass["post_kwargs"]["truncated"] is True
+
+        four_passes_all_shown = _Harness().run(
+            monkeypatch, _blob("a.py"), [_blob(f"b{i}.py") for i in range(4)])
+        assert four_passes_all_shown["post_kwargs"]["truncated"] is False
+
+    def test_the_prs_own_files_reach_the_guard(self, monkeypatch):
+        """`pr_files` is what turns a cited token into a FILE by membership
+        rather than by looking like one, so an empty list quietly reinstates
+        the shape test `_cited_files` exists to remove."""
+        seen = _Harness().run(monkeypatch, _blob("a.py"), [])
+        assert "a.py" in seen["post_kwargs"]["pr_files"], seen["post_kwargs"]
 
 
 class TestEveryPassIsReviewed:

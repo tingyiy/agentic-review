@@ -2960,10 +2960,31 @@ def _dismiss_stale_block(repo, pr, event, head_sha, truncated, unread=(),
         # block that points somewhere this run did not read is exactly the one
         # a clean result cannot speak for.
         body = r.get("body") or ""
-        cited = _cited_files(body, pr_files)
+        # THE FILES THE BLOCK IS ABOUT, NOT EVERY FILE THE BODY MENTIONS.
+        #
+        # Only `high` produces REQUEST_CHANGES, so the 🔴s are the entire reason
+        # this review blocks. Reading the whole body let a 🔵 keep a 🔴 alive:
+        # on caeli-marketing#489 both blocks cited a `.json` this run HAD read
+        # and came back clean on, and the refusal was driven by a nit pointing
+        # at an unread `brief.md`. The docstring above already said the question
+        # is "did this review read the file the block is about"; the code asked
+        # a broader one and the docstring was right.
+        #
+        # It compounds: that PR's diff is 513,579 chars against a ceiling of
+        # MAX_DIFF x MAX_PASSES = 180,000, so 65% is unread in EVERY run and
+        # some nit will always name a file nobody reached. The block could
+        # never clear itself — the SCRUM-1293 trap by a different route, total
+        # diff overflow rather than one oversize file.
+        #
+        # FALLS BACK TO THE WHOLE BODY when no 🔴 parses. A CHANGES_REQUESTED
+        # review with no recognisable blocking line is one this code cannot
+        # explain, and narrowing on a body it failed to read is exactly the
+        # false-clean this function has been burned by four times.
+        lines = _BLOCKING_LINE if _BLOCKING_LINE.search(body) else None
+        cited = _cited_files(body, pr_files, lines)
         # EXACT MATCH, not a shape test: a token this run did not read is
         # blind whether or not it looks like a path to a regex.
-        blind = sorted(_cited_tokens(body) & unread_paths)
+        blind = sorted(_cited_tokens(body, lines) & unread_paths)
         if blind or (truncated and not cited):
             # No parseable file means no way to tell — and an unparseable body
             # under truncation is the case the old blanket rule was right about.
@@ -3157,6 +3178,42 @@ def _version_phrase():
 _FINDING_LINE = re.compile(
     r"(?m)^(?:" + "|".join(re.escape(i) for i in sorted(ICON.values())) + r") .*$")
 
+def _blocking_pattern(events=None, icons=None):
+    """Finding lines whose severity is what makes a review BLOCK.
+
+    DERIVED FROM `EVENT_BY_SEVERITY`, NOT `ICON["high"]`. Which severities
+    produce REQUEST_CHANGES is that map's fact, and restating it here would be
+    the same drift `_FINDING_LINE` above was deliberately built from `ICON` to
+    avoid. The failure is not hypothetical in shape: add a second
+    REQUEST_CHANGES entry — the comment on that map already notes `medium`
+    blocks too under `required_approving_review_count: 1`, differing only in
+    visibility — and a hardcoded 🔴 under-reads, so a block raised by a 🟡 on an
+    unread file yields no blind paths and `_dismiss_stale_block` clears a LIVE
+    block. That is the false-clean this file has been burned by four times,
+    reached through the input the narrowed guard stopped reading.
+
+    Takes its inputs so the derivation can be tested against a map other than
+    today's, where a literal would pass.
+
+    Falls back to every finding line when nothing maps to REQUEST_CHANGES: an
+    empty alternation compiles to a pattern that matches on a bare space, and
+    silently narrowing to nothing is the direction that clears live blocks.
+    """
+    events = EVENT_BY_SEVERITY if events is None else events
+    icons = ICON if icons is None else icons
+    blocking = sorted(icons[s] for s, e in events.items()
+                      if e == "REQUEST_CHANGES" and s in icons)
+    if not blocking:
+        return _FINDING_LINE
+    return re.compile(r"(?m)^(?:" + "|".join(re.escape(i) for i in blocking)
+                      + r") .*$")
+
+
+#: JUST THE FINDINGS THAT MADE THE REVIEW BLOCK — every other line in the body
+#: is advisory and is answered by the review that supersedes it, not by the
+#: dismissal.
+_BLOCKING_LINE = _blocking_pattern()
+
 #: A path inside a code span, with or without a `:line` suffix. `_where_link`
 #: renders `path:line` when the finding carries a numeric line and a bare
 #: `path` when it does not — `validate_findings` does not require one — so a
@@ -3164,8 +3221,11 @@ _FINDING_LINE = re.compile(
 _CITED = re.compile(r"`([^`\n]+?)(?::\d+)?`")
 
 
-def _cited_tokens(body):
+def _cited_tokens(body, lines=None):
     """Every backticked token a review body's FINDINGS point at, normalised.
+
+    `lines` selects which finding lines to read — all of them by default, or
+    `_BLOCKING_LINE` for just the 🔴s that made a review block.
 
     NO GUESS ABOUT WHAT A PATH LOOKS LIKE. The first version kept only tokens
     containing "/" or "." to filter out prose, and dropped `Makefile`,
@@ -3180,11 +3240,11 @@ def _cited_tokens(body):
     one.
     """
     return {os.path.normpath(m.group(1))
-            for line in _FINDING_LINE.findall(body or "")
+            for line in (lines or _FINDING_LINE).findall(body or "")
             for m in _CITED.finditer(line)}
 
 
-def _cited_files(body, pr_files=()):
+def _cited_files(body, pr_files=(), lines=None):
     """Which of a block's cited tokens are FILES OF THIS PULL REQUEST.
 
     THE LAST GUESS, REMOVED. Asking "does this look like a path" kept a shape
@@ -3197,7 +3257,7 @@ def _cited_files(body, pr_files=()):
     Falls back to the shape test only when the caller cannot say what the PR
     touches, where being wrong means refusing to dismiss.
     """
-    tokens = _cited_tokens(body)
+    tokens = _cited_tokens(body, lines)
     known = {os.path.normpath(f) for f in (pr_files or []) if f}
     return (tokens & known) if known else {p for p in tokens
                                            if "/" in p or "." in p}

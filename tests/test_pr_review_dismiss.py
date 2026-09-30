@@ -678,16 +678,99 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
     def test_prose_in_backticks_is_not_a_path(self, pr_review):
         assert "normalize" not in pr_review._cited_files(self.MIXED)
 
-    def test_a_lineless_finding_about_an_unread_file_keeps_the_block(
+    def test_a_LINELESS_BLOCKING_finding_about_an_unread_file_keeps_the_block(
             self, monkeypatch, pr_review):
-        """The whole point: finding A was read, finding B was not, and the
-        block stands because of B."""
+        """A 🔴 naming its file bare, with no `:line`, still protects itself.
+
+        The unread file is on the BLOCKING line here. It used to be on a 🟡 in
+        `MIXED`, which passed for the wrong reason — see
+        `test_a_nit_about_an_unread_file_does_NOT_keep_the_block`.
+        """
         prr = pr_review
+        body = ("🔴 **no line** — `data/huge.jsonl`\n"
+                "🟡 **read one** — [`src/app.py:12`](http://x)\n")
         monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
             [{"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
-              "user": {"login": "review-bot"}, "body": self.MIXED}]))
+              "user": {"login": "review-bot"}, "body": body}]))
         monkeypatch.setattr(prr, "_me", lambda: "review-bot")
         assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=["data/huge.jsonl"]) == []
+
+    def test_a_nit_about_an_unread_file_does_NOT_keep_the_block(
+            self, monkeypatch, pr_review):
+        """caeli-marketing#489, and the point of this whole class.
+
+        Only `high` produces REQUEST_CHANGES, so the 🔴 is the entire reason a
+        block exists. On #489 both blocks cited a `.json` the run HAD read and
+        come back clean on, and the refusal was driven by a 🔵 naming an unread
+        `brief.md`. With a 513,579-char diff against a 180,000 ceiling, 65% is
+        unread in every run and some nit always names a file nobody reached —
+        so the block could never clear itself, and a human dismissed it by
+        hand. That is SCRUM-1293's trap by a different route.
+        """
+        prr = pr_review
+        body = ("🔴 **the defect** — [`src/app.py:12`](http://x)\n"
+                "🔵 **a nit** — [`docs/brief.md:3`](http://x)\n")
+        calls = self._wire(monkeypatch, prr, [
+            {"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
+             "user": {"login": "review-bot"}, "body": body}])
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
+                                        unread=["docs/brief.md"]) == [1]
+        assert any(m == "PUT" for m, _ in calls)
+
+    def test_the_blocking_icons_are_derived_from_the_event_map(self, pr_review):
+        """A SECOND MAP, not today's — a literal 🔴 passes every test written
+        against the current one.
+
+        `EVENT_BY_SEVERITY` owns which severities produce REQUEST_CHANGES. Its
+        own comment notes `medium` also blocks under
+        `required_approving_review_count: 1`, differing only in visibility, so
+        a second entry is a plausible edit. If it lands and this pattern does
+        not follow, a block raised by a 🟡 on an unread file yields no blind
+        paths and the guard clears a LIVE block.
+        """
+        prr = pr_review
+        both = dict(prr.EVENT_BY_SEVERITY, medium="REQUEST_CHANGES")
+        pat = prr._blocking_pattern(both)
+        assert pat.search(f"{prr.ICON['medium']} **x** — `a.py`")
+        assert pat.search(f"{prr.ICON['high']} **x** — `a.py`")
+        assert not pat.search(f"{prr.ICON['low']} **x** — `a.py`")
+
+    def test_only_high_blocks_today_so_a_nit_icon_is_not_matched(self, pr_review):
+        prr = pr_review
+        pat = prr._blocking_pattern()
+        assert pat.search(f"{prr.ICON['high']} **x** — `a.py`")
+        for s in ("medium", "low", "unknown"):
+            assert not pat.search(f"{prr.ICON[s]} **x** — `a.py`"), s
+
+    def test_no_blocking_severity_falls_back_to_every_finding_line(self, pr_review):
+        """An empty alternation compiles to a pattern matching a bare space,
+        and silently narrowing to nothing is the direction that clears live
+        blocks."""
+        prr = pr_review
+        pat = prr._blocking_pattern({"high": "COMMENT", "low": "APPROVE"})
+        assert pat is prr._FINDING_LINE
+
+    def test_a_block_with_no_parseable_high_falls_back_to_the_whole_body(
+            self, monkeypatch, pr_review):
+        """Narrowing to the 🔴s is only safe when a 🔴 can be found.
+
+        A CHANGES_REQUESTED review with no recognisable blocking line is one
+        this code cannot explain, and narrowing on a body it failed to read is
+        the false-clean this function has been burned by four times. So the
+        old whole-body check stands in that case.
+        """
+        prr = pr_review
+        # A 🟡, so the WHOLE-BODY parser finds a citation and the blocking-only
+        # parser finds none — the only shape that tells the two apart. And
+        # truncated=False, because `truncated and not cited` would otherwise
+        # refuse for its own reason and the test would pass either way.
+        body = "🟡 **the defect** — `data/huge.jsonl`\n"
+        monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
+            [{"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
+              "user": {"login": "review-bot"}, "body": body}]))
+        monkeypatch.setattr(prr, "_me", lambda: "review-bot")
+        assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", False,
                                         unread=["data/huge.jsonl"]) == []
 
     def test_every_severity_icon_counts_as_a_finding_line(self, pr_review):
@@ -701,7 +784,16 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
             body = f"{icon} **a** — `data/huge.jsonl`\n"
             assert prr._cited_files(body) == {"data/huge.jsonl"}, icon
 
-    def test_an_unknown_severity_finding_keeps_the_block(self, monkeypatch, pr_review):
+    def test_an_unknown_severity_finding_does_not_keep_the_block(
+            self, monkeypatch, pr_review):
+        """⚠️ maps to COMMENT in `EVENT_BY_SEVERITY`, not REQUEST_CHANGES, so
+        it withholds approval rather than blocking — it cannot be the reason a
+        CHANGES_REQUESTED exists and cannot keep one alive.
+
+        That ⚠️ is still PARSED as a finding line is the property that mattered
+        here, and it is pinned directly by
+        `test_every_severity_icon_counts_as_a_finding_line`.
+        """
         prr = pr_review
         body = ("🔴 **read one** — [`src/app.py:12`](http://x)\n"
                 "⚠️ **odd severity** — `data/huge.jsonl`\n")
@@ -710,7 +802,7 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
               "user": {"login": "review-bot"}, "body": body}]))
         monkeypatch.setattr(prr, "_me", lambda: "review-bot")
         assert prr._dismiss_stale_block("app", 1, "COMMENT", "newsha", True,
-                                        unread=["data/huge.jsonl"]) == []
+                                        unread=["data/huge.jsonl"]) == [1]
 
     def test_a_single_word_filename_keeps_the_block(self, monkeypatch, pr_review):
         """`Makefile`, `Dockerfile`, `LICENSE` have no separator and no suffix,
@@ -719,8 +811,8 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         FOURTH shape of one false-clean on this change. The decision is an exact
         set intersection now, so no filename has to look like one."""
         prr = pr_review
-        body = ("🔴 **read one** — [`src/app.py:12`](http://x)\n"
-                "🟡 **the build** — `Makefile`\n")
+        body = ("🔴 **the build** — `Makefile`\n"
+                "🟡 **read one** — [`src/app.py:12`](http://x)\n")
         monkeypatch.setattr(prr, "gh", lambda *a, **k: json.dumps(
             [{"id": 1, "state": "CHANGES_REQUESTED", "commit_id": "oldsha",
               "user": {"login": "review-bot"}, "body": body}]))
