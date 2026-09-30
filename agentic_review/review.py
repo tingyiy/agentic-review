@@ -3148,11 +3148,41 @@ def _version_phrase():
 _FINDING_LINE = re.compile(
     r"(?m)^(?:" + "|".join(re.escape(i) for i in sorted(ICON.values())) + r") .*$")
 
-#: JUST THE FINDINGS THAT MADE THE REVIEW BLOCK. `EVENT_BY_SEVERITY` sends only
-#: `high` to REQUEST_CHANGES, so a 🔴 is the entire reason a block exists —
-#: every other line in the body is advisory and is answered by the review that
-#: supersedes it, not by the dismissal.
-_BLOCKING_LINE = re.compile(r"(?m)^" + re.escape(ICON["high"]) + r" .*$")
+def _blocking_pattern(events=None, icons=None):
+    """Finding lines whose severity is what makes a review BLOCK.
+
+    DERIVED FROM `EVENT_BY_SEVERITY`, NOT `ICON["high"]`. Which severities
+    produce REQUEST_CHANGES is that map's fact, and restating it here would be
+    the same drift `_FINDING_LINE` above was deliberately built from `ICON` to
+    avoid. The failure is not hypothetical in shape: add a second
+    REQUEST_CHANGES entry — the comment on that map already notes `medium`
+    blocks too under `required_approving_review_count: 1`, differing only in
+    visibility — and a hardcoded 🔴 under-reads, so a block raised by a 🟡 on an
+    unread file yields no blind paths and `_dismiss_stale_block` clears a LIVE
+    block. That is the false-clean this file has been burned by four times,
+    reached through the input the narrowed guard stopped reading.
+
+    Takes its inputs so the derivation can be tested against a map other than
+    today's, where a literal would pass.
+
+    Falls back to every finding line when nothing maps to REQUEST_CHANGES: an
+    empty alternation compiles to a pattern that matches on a bare space, and
+    silently narrowing to nothing is the direction that clears live blocks.
+    """
+    events = EVENT_BY_SEVERITY if events is None else events
+    icons = ICON if icons is None else icons
+    blocking = sorted(icons[s] for s, e in events.items()
+                      if e == "REQUEST_CHANGES" and s in icons)
+    if not blocking:
+        return _FINDING_LINE
+    return re.compile(r"(?m)^(?:" + "|".join(re.escape(i) for i in blocking)
+                      + r") .*$")
+
+
+#: JUST THE FINDINGS THAT MADE THE REVIEW BLOCK — every other line in the body
+#: is advisory and is answered by the review that supersedes it, not by the
+#: dismissal.
+_BLOCKING_LINE = _blocking_pattern()
 
 #: A path inside a code span, with or without a `:line` suffix. `_where_link`
 #: renders `path:line` when the finding carries a numeric line and a bare

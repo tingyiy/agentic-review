@@ -718,6 +718,39 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
                                         unread=["docs/brief.md"]) == [1]
         assert any(m == "PUT" for m, _ in calls)
 
+    def test_the_blocking_icons_are_derived_from_the_event_map(self, pr_review):
+        """A SECOND MAP, not today's — a literal 🔴 passes every test written
+        against the current one.
+
+        `EVENT_BY_SEVERITY` owns which severities produce REQUEST_CHANGES. Its
+        own comment notes `medium` also blocks under
+        `required_approving_review_count: 1`, differing only in visibility, so
+        a second entry is a plausible edit. If it lands and this pattern does
+        not follow, a block raised by a 🟡 on an unread file yields no blind
+        paths and the guard clears a LIVE block.
+        """
+        prr = pr_review
+        both = dict(prr.EVENT_BY_SEVERITY, medium="REQUEST_CHANGES")
+        pat = prr._blocking_pattern(both)
+        assert pat.search(f"{prr.ICON['medium']} **x** — `a.py`")
+        assert pat.search(f"{prr.ICON['high']} **x** — `a.py`")
+        assert not pat.search(f"{prr.ICON['low']} **x** — `a.py`")
+
+    def test_only_high_blocks_today_so_a_nit_icon_is_not_matched(self, pr_review):
+        prr = pr_review
+        pat = prr._blocking_pattern()
+        assert pat.search(f"{prr.ICON['high']} **x** — `a.py`")
+        for s in ("medium", "low", "unknown"):
+            assert not pat.search(f"{prr.ICON[s]} **x** — `a.py`"), s
+
+    def test_no_blocking_severity_falls_back_to_every_finding_line(self, pr_review):
+        """An empty alternation compiles to a pattern matching a bare space,
+        and silently narrowing to nothing is the direction that clears live
+        blocks."""
+        prr = pr_review
+        pat = prr._blocking_pattern({"high": "COMMENT", "low": "APPROVE"})
+        assert pat is prr._FINDING_LINE
+
     def test_a_block_with_no_parseable_high_falls_back_to_the_whole_body(
             self, monkeypatch, pr_review):
         """Narrowing to the 🔴s is only safe when a 🔴 can be found.
