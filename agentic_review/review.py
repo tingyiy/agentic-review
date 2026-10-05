@@ -2560,6 +2560,47 @@ def _apply_withdrawals(body, event, findings, withdrawn):
     return body + _withdrawn_note(withdrawn), event
 
 
+def _demote_unread_claims(findings, excluded):
+    """A finding about a file this run never opened cannot be `high`.
+
+    caeli-marketing#519 blocked on a 🔴 that asserted what was in
+    `data/image-dims.json` — a file the SAME review body listed under "were NOT
+    opened". Measured at that head the test it predicted failing passed 10/10
+    and both ids it called absent were present. The file is over
+    `MAX_FILE_DIFF`, so no later pass could ever reach it either: the claim was
+    unfalsifiable by the reviewer, and because the head never moved
+    `_dismiss_stale_block` correctly refused to clear it. A human had to.
+
+    DECIDABLE FROM THE REVIEW'S OWN TWO HALVES — a finding names a file, the
+    caveat names the files nobody read — which is why this is arithmetic here
+    rather than something asked of the model. Both sides were already computed
+    and only ever compared AFTERWARDS, in the dismissal guard.
+
+    DEMOTED, NOT DROPPED. An unread file is not proof the finding is wrong, and
+    silently deleting it would hide a real defect the agent inferred from a
+    caller it did read. What it cannot do is BLOCK: `high` is the only severity
+    that posts REQUEST_CHANGES, and a blocking claim about unread bytes is an
+    authority the review has not earned. The note says which file and why, so
+    the author is not left guessing why a 🔴 reads as a nit.
+    """
+    unread = {os.path.normpath(p) for p in (excluded or []) if p}
+    if not unread:
+        return findings, []
+    out, demoted = [], []
+    for f in findings:
+        path = os.path.normpath(f.get("file") or "")
+        if path in unread and normalize_severity(f.get("severity")) == "high":
+            f = dict(f, severity="low")
+            f["detail"] = (f.get("detail") or "").rstrip() + (
+                f"\n\nSeverity lowered automatically: this review did not open "
+                f"`{path}`, so it cannot make a blocking claim about what is in "
+                f"it. The finding may still be right — check it against the "
+                f"file.")
+            demoted.append(path)
+        out.append(f)
+    return out, demoted
+
+
 def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
                      head_sha="", repo="", wire_fields=(), diff="",
                      excluded=(), saw_every_change=None, oversized=()):
@@ -2573,6 +2614,11 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     the thing that matters.
     """
     unseen = False
+    findings, demoted = _demote_unread_claims(findings, excluded)
+    if demoted:
+        print(f"  {len(demoted)} finding(s) lowered to low — a blocking claim "
+              f"about a file this run never opened: {', '.join(sorted(set(demoted)))}",
+              flush=True)
     body = (approval_body(head_sha, repo=repo, wire_fields=wire_fields, diff=diff,
                           excluded=excluded, oversized=oversized)
             if not findings

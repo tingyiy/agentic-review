@@ -864,3 +864,86 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         assert prr._dismiss_stale_block(
             "app", 1, "COMMENT", "newsha", True,
             unread=["x.py"], pr_files=["Makefile", "src/app.py"]) == []
+
+
+class TestAHighAboutAnUnreadFileCannotBlock:
+    """caeli-marketing#519. The review raised:
+
+        🔴 New products' primary images are unmeasured, so
+           test/image-dims.test.ts:129 fails — `data/image-dims.json:1`
+
+    while its OWN caveat said:
+
+        ⚠️ Partial review — 1 changed file(s) were NOT opened:
+           `data/image-dims.json`.
+
+    Measured at that head: the suite passed 10/10 and both ids the finding
+    called absent were present. The file is over `MAX_FILE_DIFF`, so no later
+    pass could reach it either, and because the head never moved
+    `_dismiss_stale_block` correctly refused to clear the block. A human had to.
+
+    The contradiction is decidable from the review's own two halves, which is
+    why this is arithmetic rather than something asked of the model.
+    """
+
+    def _final(self, prr, findings, excluded):
+        return prr._finalize_review(findings, [], truncated=bool(excluded),
+                                    excluded=excluded, head_sha="s" * 40)
+
+    def test_the_519_shape_does_not_request_changes(self, pr_review):
+        body, event = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "high",
+             "title": "primary images are unmeasured", "detail": "the test fails"},
+        ], ["data/image-dims.json"])
+        assert event != "REQUEST_CHANGES", body
+
+    def test_the_finding_is_kept_not_dropped(self, pr_review):
+        """An unread file is not proof the finding is wrong, and deleting it
+        would hide a real defect inferred from a caller the agent DID read."""
+        body, _ = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "high",
+             "title": "primary images are unmeasured", "detail": "the test fails"},
+        ], ["data/image-dims.json"])
+        assert "primary images are unmeasured" in body
+
+    def test_it_says_which_file_and_why(self, pr_review):
+        body, _ = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"},
+        ], ["data/image-dims.json"])
+        assert "did not open" in body and "data/image-dims.json" in body
+
+    def test_a_high_about_a_file_that_WAS_read_still_blocks(self, pr_review):
+        """The guard must not disarm the reviewer. Only the unread file's
+        finding moves."""
+        body, event = self._final(pr_review, [
+            {"file": "src/app.py", "line": 12, "severity": "high",
+             "title": "a real defect", "detail": "d"},
+        ], ["data/image-dims.json"])
+        assert event == "REQUEST_CHANGES", body
+
+    def test_a_nit_about_an_unread_file_is_left_alone(self, pr_review):
+        """Only `high` posts REQUEST_CHANGES, so only `high` is the authority
+        this takes away. Rewriting a 🔵 would be noise."""
+        body, _ = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "low",
+             "title": "t", "detail": "original detail"},
+        ], ["data/image-dims.json"])
+        assert "Severity lowered automatically" not in body
+
+    def test_nothing_excluded_changes_nothing(self, pr_review):
+        body, event = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"},
+        ], [])
+        assert event == "REQUEST_CHANGES"
+        assert "Severity lowered automatically" not in body
+
+    def test_the_paths_are_compared_normalised(self, pr_review):
+        """`unopened` comes from the diff and the finding's `file` from the
+        model; `./a/b.json` and `a/b.json` are the same file."""
+        _, event = self._final(pr_review, [
+            {"file": "./data/image-dims.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"},
+        ], ["data/image-dims.json"])
+        assert event != "REQUEST_CHANGES"
