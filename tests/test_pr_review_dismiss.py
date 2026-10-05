@@ -935,6 +935,60 @@ class TestAHighAboutAnUnreadFileCannotBlock:
         ], ["data/huge.json"])
         assert event != "REQUEST_CHANGES"
 
+    def test_a_TITLELESS_finding_demotes_on_its_synthesised_title(self, pr_review):
+        """`validate_findings` does not require a `title`, and `render` then
+        uses the first SENTENCE OF DETAIL as the heading. So the detail text
+        reaches the 🔴 line after all, the dismissal reads a path off it and
+        refuses to clear — while a demotion keyed on the raw (empty) title left
+        the finding blocking. The trap, through the fallback rather than
+        through a title the model wrote. Measured before fixing:
+
+            rendered  🔴 **The `data/huge.json` map is stale.** — [`src/app.py:12`]
+            dismissal ['data/huge.json', 'src/app.py']
+            demotion  []  -> stayed high
+        """
+        _, event = self._final(pr_review, [
+            {"file": "src/app.py", "line": 12, "severity": "high",
+             "detail": "The `data/huge.json` map is stale."},
+        ], ["data/huge.json"])
+        assert event != "REQUEST_CHANGES"
+
+    def test_the_demotion_reads_the_title_render_will_draw(self, pr_review):
+        """One definition, asserted against `render`'s own output rather than
+        restated — a second copy of the synthesis rule is what this fixes."""
+        prr = pr_review
+        f = {"file": "src/app.py", "line": 12, "severity": "high",
+             "detail": "The `data/huge.json` map is stale. And more."}
+        body = prr.render([f], True, 0, head_sha="s" * 40, repo="x",
+                          excluded=["data/huge.json"])
+        rendered = prr._BLOCKING_LINE.findall(body)[0]
+        assert prr._finding_title(f) in rendered
+
+    def test_the_demotion_follows_the_event_map(self, pr_review, monkeypatch):
+        """Which severities block is `EVENT_BY_SEVERITY`'s fact, and
+        `_blocking_pattern` already derives it for the dismissal. A literal
+        here puts the halves out of step the moment a `medium` entry lands."""
+        prr = pr_review
+        monkeypatch.setitem(prr.EVENT_BY_SEVERITY, "medium", "REQUEST_CHANGES")
+        out, demoted = prr._demote_unread_claims(
+            [{"file": "a.json", "severity": "medium", "title": "t", "detail": "d"}],
+            ["a.json"])
+        assert demoted == ["a.json"] and out[0]["severity"] == "low"
+
+    def test_the_demotion_announces_itself_once(self, pr_review, capsys):
+        """`main` demotes before logging severities and `_finalize_review`
+        demotes again so no caller can post a blocking claim about unread
+        bytes. With the print at a call site the second call found nothing
+        left to demote and the line fired ZERO times in a real run."""
+        prr = pr_review
+        f = [{"file": "a.json", "line": 1, "severity": "high",
+              "title": "t", "detail": "d"}]
+        once, _ = prr._demote_unread_claims(f, ["a.json"])
+        prr._finalize_review(once, [], truncated=True, excluded=["a.json"],
+                             head_sha="s" * 40)
+        out = capsys.readouterr().out
+        assert out.count("lowered to low") == 1, out
+
     def test_detail_alone_does_not_demote(self, pr_review):
         """`detail` is not on the 🔴 line, so the dismissal never reads it
         either. Demoting on it would make the two halves disagree again, in the

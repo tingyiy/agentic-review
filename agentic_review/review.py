@@ -2560,6 +2560,34 @@ def _apply_withdrawals(body, event, findings, withdrawn):
     return body + _withdrawn_note(withdrawn), event
 
 
+def _finding_title(f, detail=None):
+    """The title this finding will RENDER with, synthesis included.
+
+    ONE DEFINITION, because two things read it: `render` draws it, and
+    `_demote_unread_claims` has to know which paths land on the 🔴 line — the
+    line `_dismiss_stale_block` later parses. Reading the raw `title` was not
+    the same question: `validate_findings` does not require one, and a finding
+    without it renders its first SENTENCE OF DETAIL as the heading. So
+
+        {"file": "src/app.py", "severity": "high",
+         "detail": "The `data/huge.json` map is stale."}
+
+    renders `🔴 **The `data/huge.json` map is stale.** — [`src/app.py:12`]`, the
+    dismissal reads both paths off it and refuses to clear, while a demotion
+    keyed on the raw (empty) title left the finding blocking. Not demoted so it
+    blocks, blind non-empty so it can never clear — the exact trap, reached
+    through the fallback rather than through a title the model wrote.
+    """
+    if detail is None:
+        detail = _defang_links(_unescape_backticks(f.get("detail")).strip())
+    title = _defang_links(str(f.get("title", "")).strip())
+    if title:
+        return title
+    # The model dropped `title` on a real run and rendered "(untitled)" four
+    # times; the heading is what makes a list scannable.
+    return re.split(r"(?<=[.!?])\s", detail)[0][:110] if detail else "(no detail)"
+
+
 def _demote_unread_claims(findings, excluded):
     """A finding about a file this run never opened cannot be `high`.
 
@@ -2604,8 +2632,16 @@ def _demote_unread_claims(findings, excluded):
         # Widening here rather than narrowing the dismissal keeps that guard's
         # conservatism and makes the undismissable case non-blocking instead.
         cited = {path} | {os.path.normpath(m.group(1))
-                          for m in _CITED.finditer(f.get("title") or "")}
-        if (cited & unread) and normalize_severity(f.get("severity")) == "high":
+                          for m in _CITED.finditer(_finding_title(f))}
+        # DERIVED, NOT RESTATED. Which severities post REQUEST_CHANGES is
+        # `EVENT_BY_SEVERITY`'s fact, and `_blocking_pattern` already exists so
+        # the dismissal reads it from there rather than hardcoding 🔴. A second
+        # literal here puts the two halves back out of step the moment a
+        # `medium` entry lands — the dismissal would treat a 🟡 on an unread
+        # file as blocking and refuse to clear it, while this left it blocking.
+        blocks = EVENT_BY_SEVERITY.get(
+            normalize_severity(f.get("severity"))) == "REQUEST_CHANGES"
+        if (cited & unread) and blocks:
             path = sorted(cited & unread)[0]
             f = dict(f, severity="low")
             f["detail"] = (f.get("detail") or "").rstrip() + (
@@ -2615,6 +2651,15 @@ def _demote_unread_claims(findings, excluded):
                 f"file.")
             demoted.append(path)
         out.append(f)
+    # PRINTED HERE, NOT AT A CALL SITE. `main` demotes before logging the
+    # severity breakdown and `_finalize_review` demotes again so no caller can
+    # post a blocking claim about unread bytes — and when the caller printed
+    # it, the second call found nothing left to demote and the line fired ZERO
+    # times in a real run. One place, once per actual demotion.
+    if demoted:
+        print(f"  {len(demoted)} finding(s) lowered to low — a blocking claim "
+              f"about a file this run never opened: "
+              f"{', '.join(sorted(set(demoted)))}", flush=True)
     return out, demoted
 
 
@@ -2631,11 +2676,7 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     the thing that matters.
     """
     unseen = False
-    findings, demoted = _demote_unread_claims(findings, excluded)
-    if demoted:
-        print(f"  {len(demoted)} finding(s) lowered to low — a blocking claim "
-              f"about a file this run never opened: {', '.join(sorted(set(demoted)))}",
-              flush=True)
+    findings, _ = _demote_unread_claims(findings, excluded)
     body = (approval_body(head_sha, repo=repo, wire_fields=wire_fields, diff=diff,
                           excluded=excluded, oversized=oversized)
             if not findings
@@ -3645,11 +3686,7 @@ def render(findings, truncated, skipped, head_sha="", repo="", diff="",
         # with visible backslashes through the one thing it most needs to show.
         # Seen on infra#106, where every code span in the review was `\\`${X}\\``.
         detail = _defang_links(_unescape_backticks(f.get("detail")).strip())
-        title = _defang_links(str(f.get("title", "")).strip())
-        if not title:
-            # The model dropped `title` on a real run and rendered "(untitled)"
-            # four times; the heading is what makes a list scannable.
-            title = re.split(r"(?<=[.!?])\s", detail)[0][:110] if detail else "(no detail)"
+        title = _finding_title(f, detail)
         lines += [f"{ICON[sev]} **{title}** — {where}", detail, ""]
         lines += _fix_block(f)
     if len(findings) > MAX_FINDINGS:
