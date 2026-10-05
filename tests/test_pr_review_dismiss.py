@@ -1048,6 +1048,37 @@ class TestAHighAboutAnUnreadFileCannotBlock:
             "the demotion must be the wider side; if the dismissal ever holds "
             "something this does not demote, that is the unclearable block")
 
+    def test_the_note_names_the_findings_OWN_file_when_that_is_the_unread_one(
+            self, pr_review):
+        """`cited` also holds the title's backticks, so the alphabetically
+        first match could name a path the finding is not about — telling the
+        reader the wrong file is why the severity dropped."""
+        body, _ = self._final(pr_review, [
+            {"file": "zz/mine.json", "line": 1, "severity": "high",
+             "title": "the `aa/other.json` map is stale", "detail": "d"},
+        ], ["zz/mine.json", "aa/other.json"])
+        assert "did not open `zz/mine.json`" in body, body
+
+    def test_the_note_falls_back_when_the_findings_own_file_WAS_read(
+            self, pr_review):
+        body, _ = self._final(pr_review, [
+            {"file": "src/app.py", "line": 1, "severity": "high",
+             "title": "the `aa/other.json` map is stale", "detail": "d"},
+        ], ["aa/other.json"])
+        assert "did not open `aa/other.json`" in body, body
+
+    def test_one_derivation_of_detail(self, pr_review):
+        """`render` draws it, `_finding_title` falls back to its first
+        sentence, and the demotion reads that heading. The demotion used to
+        call `_finding_title(f)` while `render` passed its own copy —
+        identical today, so a change to either would have diverged silently."""
+        prr = pr_review
+        f = {"file": "a.py", "line": 1, "severity": "high",
+             "detail": "  First `x/y.json` sentence.  Second one.  "}
+        body = prr.render([f], False, 0, head_sha="s" * 40, repo="x")
+        assert prr._finding_detail(f) in body
+        assert prr._finding_title(f) in prr._BLOCKING_LINE.findall(body)[0]
+
     def test_a_finding_with_no_file_is_untouched(self, pr_review):
         """`_where_link` renders `_the pull request_`, so a PR-level finding —
         a missing ticket id, an unsigned agent commit — puts no path on the 🔴

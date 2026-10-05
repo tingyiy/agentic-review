@@ -2560,7 +2560,23 @@ def _apply_withdrawals(body, event, findings, withdrawn):
     return body + _withdrawn_note(withdrawn), event
 
 
-def _finding_title(f, detail=None):
+def _finding_detail(f):
+    """A finding's detail, as it will be RENDERED.
+
+    One derivation, because three things need the same string: `render` draws
+    it, `_finding_title` falls back to its first sentence, and
+    `_demote_unread_claims` reads that heading to decide what the finding
+    cites. The demotion used to call `_finding_title(f)` while `render` called
+    `_finding_title(f, detail)` with its own copy — identical expressions
+    today, so they agreed, but a change to either side would have silently
+    reopened the divergence this whole helper exists to close. Raised by the
+    reviewer, which pointed out that the demotion was the one caller not
+    passing the value the renderer actually used.
+    """
+    return _defang_links(_unescape_backticks(f.get("detail")).strip())
+
+
+def _finding_title(f):
     """The title this finding will RENDER with, synthesis included.
 
     ONE DEFINITION, because two things read it: `render` draws it, and
@@ -2578,8 +2594,7 @@ def _finding_title(f, detail=None):
     blocks, blind non-empty so it can never clear — the exact trap, reached
     through the fallback rather than through a title the model wrote.
     """
-    if detail is None:
-        detail = _defang_links(_unescape_backticks(f.get("detail")).strip())
+    detail = _finding_detail(f)
     title = _defang_links(str(f.get("title", "")).strip())
     if title:
         return title
@@ -2673,7 +2688,13 @@ def _demote_unread_claims(findings, excluded):
         blocks = EVENT_BY_SEVERITY.get(
             normalize_severity(f.get("severity"))) == "REQUEST_CHANGES"
         if (cited & unread) and blocks:
-            path = sorted(cited & unread)[0]
+            # THE FINDING'S OWN FILE FIRST. `cited` also holds the title's
+            # backticks, so the alphabetically-first match could name a path
+            # the finding is not about — telling the reader the wrong file is
+            # why the severity dropped. Falls back to the sorted set only when
+            # the finding's own file was read and a cited one was not.
+            hits = cited & unread
+            path = path if path in hits else sorted(hits)[0]
             f = dict(f, severity="low")
             f["detail"] = (f.get("detail") or "").rstrip() + (
                 f"\n\nSeverity lowered automatically: this review did not open "
@@ -3716,8 +3737,8 @@ def render(findings, truncated, skipped, head_sha="", repo="", diff="",
         # GitHub renders `\\`` literally — so a finding that quotes code arrives
         # with visible backslashes through the one thing it most needs to show.
         # Seen on infra#106, where every code span in the review was `\\`${X}\\``.
-        detail = _defang_links(_unescape_backticks(f.get("detail")).strip())
-        title = _finding_title(f, detail)
+        detail = _finding_detail(f)
+        title = _finding_title(f)
         lines += [f"{ICON[sev]} **{title}** — {where}", detail, ""]
         lines += _fix_block(f)
     if len(findings) > MAX_FINDINGS:
