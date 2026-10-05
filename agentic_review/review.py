@@ -2635,9 +2635,11 @@ def _demote_unread_claims(findings, excluded):
         # not a claim about unread bytes in the first place.
         #
         # THE SAME TOKENS THE DISMISSAL WILL READ, AND DELIBERATELY A FEW MORE.
-        # `_key` strips a leading slash and `_cited_tokens` does not, so a
-        # finding whose `file` is `/data/huge.json` demotes here and is invisible
-        # to the dismissal. That asymmetry is on purpose and only runs one way:
+        # `_key` strips a leading slash and `_cited_tokens` does not, so any
+        # token this side reads — the `file` field AND the title's backticks —
+        # can match an unread path that the dismissal would miss. A finding
+        # whose `file` is `/data/huge.json` demotes here and is invisible to
+        # the dismissal; so does one whose TITLE cites `/data/huge.json`. That asymmetry is on purpose and only runs one way:
         # this side may demote something the dismissal would not have held, which
         # costs a 🔴 that becomes a 🔵; the reverse — the dismissal holding a
         # block this side left blocking — is the trap, and widening here is what

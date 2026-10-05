@@ -947,11 +947,32 @@ class TestAHighAboutAnUnreadFileCannotBlock:
             dismissal ['data/huge.json', 'src/app.py']
             demotion  []  -> stayed high
         """
-        _, event = self._final(pr_review, [
-            {"file": "src/app.py", "line": 12, "severity": "high",
-             "detail": "The `data/huge.json` map is stale."},
-        ], ["data/huge.json"])
+        f = {"file": "src/app.py", "line": 12, "severity": "high",
+             "detail": "The `data/huge.json` map is stale."}
+        _, event = self._final(pr_review, [dict(f)], ["data/huge.json"])
         assert event != "REQUEST_CHANGES"
+
+        # THE APPEND MUST NOT BECOME THE HEADING. `_demote_unread_claims`
+        # rewrites `detail`, and `_finding_title` synthesises the heading from
+        # its FIRST SENTENCE — so the token set the demotion read and the one
+        # `render` draws could drift apart if the note were ever appended
+        # without its blank line, or the split became a paragraph split. It
+        # holds today; nothing pinned it. Raised by the reviewer, which traced
+        # it and said so rather than calling it a defect.
+        #
+        # MEASURED WHILE PINNING IT: NEITHER named risk alone breaks this.
+        # Dropping the blank line still leaves the sentence split returning
+        # the original first sentence; switching to a paragraph split still
+        # leaves the note in the second paragraph. Only BOTH together move the
+        # heading, and this assertion goes red on that pair. Two independent
+        # protections — worth knowing before either is touched, because "it
+        # holds" without saying why is what lets the second one get removed.
+        before = pr_review._finding_title(f)
+        out, _ = pr_review._demote_unread_claims([f], ["data/huge.json"])
+        assert pr_review._finding_title(out[0]) == before
+        body = pr_review.render(out, True, 0, head_sha="s" * 40, repo="x",
+                                excluded=["data/huge.json"])
+        assert before in body
 
     def test_the_demotion_reads_the_title_render_will_draw(self, pr_review):
         """One definition, asserted against `render`'s own output rather than
