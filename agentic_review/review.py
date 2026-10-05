@@ -2611,12 +2611,29 @@ def _demote_unread_claims(findings, excluded):
     authority the review has not earned. The note says which file and why, so
     the author is not left guessing why a 🔴 reads as a nit.
     """
-    unread = {os.path.normpath(p) for p in (excluded or []) if p}
+    def _key(path):
+        # LEADING SLASHES STRIPPED, which `os.path.normpath` keeps. The model
+        # sometimes writes `/data/huge.json` and `_where_link` renders that
+        # span verbatim, so an absolute-looking `file` matched nothing in the
+        # unread set and the finding kept its 🔴. Measured: `_cited_tokens`
+        # misses it too, so the dismissal still clears — this is a demotion
+        # MISS, not the undismissable trap. Widening only here is the safe
+        # direction; the dismissal guard is deployed and conservative, and
+        # making it stricter could clear a block it should keep.
+        return os.path.normpath(str(path or "")).lstrip("/")
+
+    unread = {_key(p) for p in (excluded or []) if p}
     if not unread:
         return findings, []
     out, demoted = [], []
     for f in findings:
-        path = os.path.normpath(f.get("file") or "")
+        path = _key(f.get("file"))
+        # A FINDING WITH NO `file` IS OUT OF SCOPE FOR BOTH HALVES, not covered
+        # by the claim below: `_where_link` renders `_the pull request_`, so
+        # the 🔴 line carries no path, the dismissal reads none either, and a
+        # PR-level finding (a missing ticket id, an unsigned agent commit) is
+        # not a claim about unread bytes in the first place.
+        #
         # THE SAME TOKENS THE DISMISSAL WILL READ, or the two halves disagree
         # about what "a claim about an unread file" is. `_dismiss_stale_block`
         # intersects `_cited_tokens(body, _BLOCKING_LINE)` with the unread set,
@@ -2631,7 +2648,7 @@ def _demote_unread_claims(findings, excluded):
         #
         # Widening here rather than narrowing the dismissal keeps that guard's
         # conservatism and makes the undismissable case non-blocking instead.
-        cited = {path} | {os.path.normpath(m.group(1))
+        cited = {path} | {_key(m.group(1))
                           for m in _CITED.finditer(_finding_title(f))}
         # DERIVED, NOT RESTATED. Which severities post REQUEST_CHANGES is
         # `EVENT_BY_SEVERITY`'s fact, and `_blocking_pattern` already exists so

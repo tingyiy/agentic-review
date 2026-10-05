@@ -989,6 +989,33 @@ class TestAHighAboutAnUnreadFileCannotBlock:
         out = capsys.readouterr().out
         assert out.count("lowered to low") == 1, out
 
+    def test_an_absolute_looking_file_still_demotes(self, pr_review):
+        """`os.path.normpath` KEEPS a leading slash, and the model sometimes
+        writes `/data/huge.json`. That matched nothing in the unread set, so
+        the finding kept its 🔴.
+
+        Measured: `_cited_tokens` misses it too, so the dismissal still clears
+        — a demotion MISS, not the undismissable trap. (The reviewer predicted
+        `blind` would be non-empty here; it is empty.) Widened only on this
+        side: the dismissal guard is deployed and conservative, and making it
+        stricter could keep a block it should clear.
+        """
+        _, event = self._final(pr_review, [
+            {"file": "/data/huge.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"},
+        ], ["data/huge.json"])
+        assert event != "REQUEST_CHANGES"
+
+    def test_a_finding_with_no_file_is_untouched(self, pr_review):
+        """`_where_link` renders `_the pull request_`, so a PR-level finding —
+        a missing ticket id, an unsigned agent commit — puts no path on the 🔴
+        line. It is not a claim about unread bytes and must keep its
+        severity."""
+        out, demoted = pr_review._demote_unread_claims(
+            [{"file": "", "severity": "high", "title": "no ticket id",
+              "detail": "d"}], ["data/huge.json"])
+        assert demoted == [] and out[0]["severity"] == "high"
+
     def test_detail_alone_does_not_demote(self, pr_review):
         """`detail` is not on the 🔴 line, so the dismissal never reads it
         either. Demoting on it would make the two halves disagree again, in the
