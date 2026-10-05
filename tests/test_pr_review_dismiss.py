@@ -1006,6 +1006,27 @@ class TestAHighAboutAnUnreadFileCannotBlock:
         ], ["data/huge.json"])
         assert event != "REQUEST_CHANGES"
 
+    def test_the_demotion_is_a_superset_of_what_the_dismissal_holds(self, pr_review):
+        """The asymmetry runs ONE way, and that is the safe way.
+
+        Demoting something the dismissal would not have held costs a 🔴 that
+        becomes a 🔵. The reverse — the dismissal holding a block this side
+        left blocking — is the trap. `/data/huge.json` is the live case: this
+        side strips the leading slash, `_cited_tokens` does not.
+        """
+        prr = pr_review
+        import os
+        f = {"file": "/data/huge.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"}
+        unread = {os.path.normpath("data/huge.json")}
+        body = prr.render([f], True, 0, head_sha="s" * 40, repo="x",
+                          excluded=["data/huge.json"])
+        held = prr._cited_tokens(body, prr._BLOCKING_LINE) & unread
+        _, demoted = prr._demote_unread_claims([f], ["data/huge.json"])
+        assert demoted and not held, (
+            "the demotion must be the wider side; if the dismissal ever holds "
+            "something this does not demote, that is the unclearable block")
+
     def test_a_finding_with_no_file_is_untouched(self, pr_review):
         """`_where_link` renders `_the pull request_`, so a PR-level finding —
         a missing ticket id, an unsigned agent commit — puts no path on the 🔴

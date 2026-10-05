@@ -2634,7 +2634,19 @@ def _demote_unread_claims(findings, excluded):
         # PR-level finding (a missing ticket id, an unsigned agent commit) is
         # not a claim about unread bytes in the first place.
         #
-        # THE SAME TOKENS THE DISMISSAL WILL READ, or the two halves disagree
+        # THE SAME TOKENS THE DISMISSAL WILL READ, AND DELIBERATELY A FEW MORE.
+        # `_key` strips a leading slash and `_cited_tokens` does not, so a
+        # finding whose `file` is `/data/huge.json` demotes here and is invisible
+        # to the dismissal. That asymmetry is on purpose and only runs one way:
+        # this side may demote something the dismissal would not have held, which
+        # costs a 🔴 that becomes a 🔵; the reverse — the dismissal holding a
+        # block this side left blocking — is the trap, and widening here is what
+        # prevents it. An earlier version of this comment claimed the two token
+        # sets were identical, which contradicted the note on `_key` six lines
+        # up. Raised by the reviewer, which asked which of the two was the whole
+        # story; this is.
+        #
+        # The shared part, which is where the trap actually lives: the two halves disagree
         # about what "a claim about an unread file" is. `_dismiss_stale_block`
         # intersects `_cited_tokens(body, _BLOCKING_LINE)` with the unread set,
         # and the rendered 🔴 line is `**{title}** — [`{file}:{line}`](…)` —
