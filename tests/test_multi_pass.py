@@ -111,6 +111,26 @@ class TestWhatMainHandsTheDismissalGuard:
         assert "a.py" in seen["post_kwargs"]["pr_files"], seen["post_kwargs"]
 
 
+
+class TestTheLogReportsWhatWasPosted:
+    """`_finalize_review` demotes a blocking claim about a file nobody opened,
+    but it rebinds only its own local — so `main` printed the PRE-demotion
+    severities and set the commit status from them. A run that posted a 🔵
+    reported "1 high", and the status is what a reader sees without opening
+    the PR. Raised by the reviewer on the PR that added the demotion.
+    """
+
+    def test_a_demoted_high_is_not_logged_as_high(self, monkeypatch, capsys):
+        _Harness().run(monkeypatch, _blob("a.py"), [],
+                       findings_per_pass=[[{
+                           "file": "data/huge.json", "line": 1,
+                           "severity": "high", "title": "t", "detail": "d"}]],
+                       excluded=["data/huge.json"])
+        out = capsys.readouterr().out
+        assert "1 finding(s): 1 low" in out, out
+        assert "1 high" not in out, out
+
+
 class TestEveryPassIsReviewed:
     def test_each_pass_gets_its_own_call(self, monkeypatch):
         seen = _Harness().run(monkeypatch, _blob("a.py"),

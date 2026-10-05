@@ -913,6 +913,53 @@ class TestAHighAboutAnUnreadFileCannotBlock:
         ], ["data/image-dims.json"])
         assert "did not open" in body and "data/image-dims.json" in body
 
+    def test_a_path_backticked_in_the_TITLE_also_demotes(self, pr_review):
+        """THE ONLY DIVERGENCE between this and the dismissal guard.
+
+        `_dismiss_stale_block` intersects `_cited_tokens(body, _BLOCKING_LINE)`
+        with the unread set, and the rendered 🔴 line is
+        `**{title}** — [`{file}:{line}`](…)`; `detail` and `fix` are on their
+        own lines and never reach it. So a path backticked in the TITLE is read
+        by the dismissal and was not read by the demotion — not demoted, so it
+        blocks; blind non-empty, so it can never clear. Measured before fixing:
+
+            dismissal reads   ['data/huge.json', 'src/app.py']
+            demotion keyed on  src/app.py
+
+        Raised by the reviewer, which attributed it to `detail` rather than the
+        title; the asymmetry is real, the mechanism it gave was not.
+        """
+        _, event = self._final(pr_review, [
+            {"file": "src/app.py", "line": 12, "severity": "high",
+             "title": "the `data/huge.json` map is stale", "detail": "d"},
+        ], ["data/huge.json"])
+        assert event != "REQUEST_CHANGES"
+
+    def test_detail_alone_does_not_demote(self, pr_review):
+        """`detail` is not on the 🔴 line, so the dismissal never reads it
+        either. Demoting on it would make the two halves disagree again, in the
+        other direction, and would mute real findings for mentioning a big
+        file in prose."""
+        _, event = self._final(pr_review, [
+            {"file": "src/app.py", "line": 12, "severity": "high",
+             "title": "a real defect",
+             "detail": "this also loads `data/huge.json` at boot"},
+        ], ["data/huge.json"])
+        assert event == "REQUEST_CHANGES"
+
+    def test_the_demoted_list_reaches_the_caller(self, monkeypatch, pr_review):
+        """`_finalize_review` rebinds only its own local, so `main`'s log line
+        and the commit status reported the PRE-demotion severities — a run that
+        posted a 🔵 printed "1 high" and set a status to match."""
+        prr = pr_review
+        f = [{"file": "data/image-dims.json", "line": 1, "severity": "high",
+              "title": "t", "detail": "d"}]
+        out, demoted = prr._demote_unread_claims(f, ["data/image-dims.json"])
+        assert demoted == ["data/image-dims.json"]
+        assert prr.severity_breakdown(out) == prr.severity_breakdown(
+            [dict(f[0], severity="low")])
+        assert f[0]["severity"] == "high", "the input list must not be mutated"
+
     def test_a_high_about_a_file_that_WAS_read_still_blocks(self, pr_review):
         """The guard must not disarm the reviewer. Only the unread file's
         finding moves."""

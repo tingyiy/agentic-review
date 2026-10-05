@@ -2589,7 +2589,24 @@ def _demote_unread_claims(findings, excluded):
     out, demoted = [], []
     for f in findings:
         path = os.path.normpath(f.get("file") or "")
-        if path in unread and normalize_severity(f.get("severity")) == "high":
+        # THE SAME TOKENS THE DISMISSAL WILL READ, or the two halves disagree
+        # about what "a claim about an unread file" is. `_dismiss_stale_block`
+        # intersects `_cited_tokens(body, _BLOCKING_LINE)` with the unread set,
+        # and the rendered 🔴 line is `**{title}** — [`{file}:{line}`](…)` —
+        # `detail` and `fix` are on their own lines and never reach it. So the
+        # only divergence is a path backticked in the TITLE, and it is the trap
+        # shape exactly: not demoted, so it blocks; blind non-empty, so it can
+        # never clear. Measured before fixing, with `data/huge.json` unread:
+        #
+        #   dismissal reads   ['data/huge.json', 'src/app.py']
+        #   demotion keyed on  src/app.py        -> BLOCKS and CANNOT CLEAR
+        #
+        # Widening here rather than narrowing the dismissal keeps that guard's
+        # conservatism and makes the undismissable case non-blocking instead.
+        cited = {path} | {os.path.normpath(m.group(1))
+                          for m in _CITED.finditer(f.get("title") or "")}
+        if (cited & unread) and normalize_severity(f.get("severity")) == "high":
+            path = sorted(cited & unread)[0]
             f = dict(f, severity="low")
             f["detail"] = (f.get("detail") or "").rstrip() + (
                 f"\n\nSeverity lowered automatically: this review did not open "
@@ -4184,6 +4201,14 @@ def main():
     # on every multi-pass PR, and the "the base moved, this PR's own changes did
     # not" skip could never fire: every update-branch paid for a full multi-pass
     # review. Found by this reviewer on its own PR.
+    # DEMOTED HERE TOO, so the log line and the commit status report the
+    # severities that were POSTED. `_finalize_review` does this as well — it
+    # has to, so no caller can post a blocking claim about an unread file — but
+    # it rebinds only its own local, so a run that posted a 🔵 still printed
+    # "1 high" and set a status to match. The status is what a reader sees
+    # without opening the PR. Idempotent: the second pass sees `low` and
+    # changes nothing.
+    findings, _ = _demote_unread_claims(findings, unopened)
     body, event = _finalize_review(findings, withdrawn, truncated, skipped,
                                    head_sha=head_sha, repo=repo,
                                    wire_fields=wire_fields, diff=fingerprinted,
