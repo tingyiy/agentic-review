@@ -864,3 +864,287 @@ class TestTruncationOnlyMattersWhereTheBlockIs:
         assert prr._dismiss_stale_block(
             "app", 1, "COMMENT", "newsha", True,
             unread=["x.py"], pr_files=["Makefile", "src/app.py"]) == []
+
+
+class TestAHighAboutAnUnreadFileCannotBlock:
+    """caeli-marketing#519. The review raised:
+
+        🔴 New products' primary images are unmeasured, so
+           test/image-dims.test.ts:129 fails — `data/image-dims.json:1`
+
+    while its OWN caveat said:
+
+        ⚠️ Partial review — 1 changed file(s) were NOT opened:
+           `data/image-dims.json`.
+
+    Measured at that head: the suite passed 10/10 and both ids the finding
+    called absent were present. The file is over `MAX_FILE_DIFF`, so no later
+    pass could reach it either, and because the head never moved
+    `_dismiss_stale_block` correctly refused to clear the block. A human had to.
+
+    The contradiction is decidable from the review's own two halves, which is
+    why this is arithmetic rather than something asked of the model.
+    """
+
+    def _final(self, prr, findings, excluded):
+        return prr._finalize_review(findings, [], truncated=bool(excluded),
+                                    excluded=excluded, head_sha="s" * 40)
+
+    def test_the_519_shape_does_not_request_changes(self, pr_review):
+        body, event = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "high",
+             "title": "primary images are unmeasured", "detail": "the test fails"},
+        ], ["data/image-dims.json"])
+        assert event != "REQUEST_CHANGES", body
+
+    def test_the_finding_is_kept_not_dropped(self, pr_review):
+        """An unread file is not proof the finding is wrong, and deleting it
+        would hide a real defect inferred from a caller the agent DID read."""
+        body, _ = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "high",
+             "title": "primary images are unmeasured", "detail": "the test fails"},
+        ], ["data/image-dims.json"])
+        assert "primary images are unmeasured" in body
+
+    def test_it_says_which_file_and_why(self, pr_review):
+        body, _ = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"},
+        ], ["data/image-dims.json"])
+        assert "did not open" in body and "data/image-dims.json" in body
+
+    def test_a_path_backticked_in_the_TITLE_also_demotes(self, pr_review):
+        """THE ONLY DIVERGENCE between this and the dismissal guard.
+
+        `_dismiss_stale_block` intersects `_cited_tokens(body, _BLOCKING_LINE)`
+        with the unread set, and the rendered 🔴 line is
+        `**{title}** — [`{file}:{line}`](…)`; `detail` and `fix` are on their
+        own lines and never reach it. So a path backticked in the TITLE is read
+        by the dismissal and was not read by the demotion — not demoted, so it
+        blocks; blind non-empty, so it can never clear. Measured before fixing:
+
+            dismissal reads   ['data/huge.json', 'src/app.py']
+            demotion keyed on  src/app.py
+
+        Raised by the reviewer, which attributed it to `detail` rather than the
+        title; the asymmetry is real, the mechanism it gave was not.
+        """
+        _, event = self._final(pr_review, [
+            {"file": "src/app.py", "line": 12, "severity": "high",
+             "title": "the `data/huge.json` map is stale", "detail": "d"},
+        ], ["data/huge.json"])
+        assert event != "REQUEST_CHANGES"
+
+    def test_a_TITLELESS_finding_demotes_on_its_synthesised_title(self, pr_review):
+        """`validate_findings` does not require a `title`, and `render` then
+        uses the first SENTENCE OF DETAIL as the heading. So the detail text
+        reaches the 🔴 line after all, the dismissal reads a path off it and
+        refuses to clear — while a demotion keyed on the raw (empty) title left
+        the finding blocking. The trap, through the fallback rather than
+        through a title the model wrote. Measured before fixing:
+
+            rendered  🔴 **The `data/huge.json` map is stale.** — [`src/app.py:12`]
+            dismissal ['data/huge.json', 'src/app.py']
+            demotion  []  -> stayed high
+        """
+        f = {"file": "src/app.py", "line": 12, "severity": "high",
+             "detail": "The `data/huge.json` map is stale."}
+        _, event = self._final(pr_review, [dict(f)], ["data/huge.json"])
+        assert event != "REQUEST_CHANGES"
+
+        # THE APPEND MUST NOT BECOME THE HEADING. `_demote_unread_claims`
+        # rewrites `detail`, and `_finding_title` synthesises the heading from
+        # its FIRST SENTENCE — so the token set the demotion read and the one
+        # `render` draws could drift apart if the note were ever appended
+        # without its blank line, or the split became a paragraph split. It
+        # holds today; nothing pinned it. Raised by the reviewer, which traced
+        # it and said so rather than calling it a defect.
+        #
+        # MEASURED WHILE PINNING IT: NEITHER named risk alone breaks this.
+        # Dropping the blank line still leaves the sentence split returning
+        # the original first sentence; switching to a paragraph split still
+        # leaves the note in the second paragraph. Only BOTH together move the
+        # heading, and this assertion goes red on that pair. Two independent
+        # protections — worth knowing before either is touched, because "it
+        # holds" without saying why is what lets the second one get removed.
+        before = pr_review._finding_title(f)
+        out, _ = pr_review._demote_unread_claims([f], ["data/huge.json"])
+        assert pr_review._finding_title(out[0]) == before
+        body = pr_review.render(out, True, 0, head_sha="s" * 40, repo="x",
+                                excluded=["data/huge.json"])
+        assert before in body
+
+    def test_the_demotion_reads_the_title_render_will_draw(self, pr_review):
+        """One definition, asserted against `render`'s own output rather than
+        restated — a second copy of the synthesis rule is what this fixes."""
+        prr = pr_review
+        f = {"file": "src/app.py", "line": 12, "severity": "high",
+             "detail": "The `data/huge.json` map is stale. And more."}
+        body = prr.render([f], True, 0, head_sha="s" * 40, repo="x",
+                          excluded=["data/huge.json"])
+        rendered = prr._BLOCKING_LINE.findall(body)[0]
+        assert prr._finding_title(f) in rendered
+
+    def test_the_demotion_follows_the_event_map(self, pr_review, monkeypatch):
+        """Which severities block is `EVENT_BY_SEVERITY`'s fact, and
+        `_blocking_pattern` already derives it for the dismissal. A literal
+        here puts the halves out of step the moment a `medium` entry lands."""
+        prr = pr_review
+        monkeypatch.setitem(prr.EVENT_BY_SEVERITY, "medium", "REQUEST_CHANGES")
+        out, demoted = prr._demote_unread_claims(
+            [{"file": "a.json", "severity": "medium", "title": "t", "detail": "d"}],
+            ["a.json"])
+        assert demoted == ["a.json"] and out[0]["severity"] == "low"
+
+    def test_the_demotion_announces_itself_once(self, pr_review, capsys):
+        """`main` demotes before logging severities and `_finalize_review`
+        demotes again so no caller can post a blocking claim about unread
+        bytes. With the print at a call site the second call found nothing
+        left to demote and the line fired ZERO times in a real run."""
+        prr = pr_review
+        f = [{"file": "a.json", "line": 1, "severity": "high",
+              "title": "t", "detail": "d"}]
+        once, _ = prr._demote_unread_claims(f, ["a.json"])
+        prr._finalize_review(once, [], truncated=True, excluded=["a.json"],
+                             head_sha="s" * 40)
+        out = capsys.readouterr().out
+        assert out.count("lowered to low") == 1, out
+
+    def test_an_absolute_looking_file_still_demotes(self, pr_review):
+        """`os.path.normpath` KEEPS a leading slash, and the model sometimes
+        writes `/data/huge.json`. That matched nothing in the unread set, so
+        the finding kept its 🔴.
+
+        Measured: `_cited_tokens` misses it too, so the dismissal still clears
+        — a demotion MISS, not the undismissable trap. (The reviewer predicted
+        `blind` would be non-empty here; it is empty.) Widened only on this
+        side: the dismissal guard is deployed and conservative, and making it
+        stricter could keep a block it should clear.
+        """
+        _, event = self._final(pr_review, [
+            {"file": "/data/huge.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"},
+        ], ["data/huge.json"])
+        assert event != "REQUEST_CHANGES"
+
+    def test_the_demotion_is_a_superset_of_what_the_dismissal_holds(self, pr_review):
+        """The asymmetry runs ONE way, and that is the safe way.
+
+        Demoting something the dismissal would not have held costs a 🔴 that
+        becomes a 🔵. The reverse — the dismissal holding a block this side
+        left blocking — is the trap. `/data/huge.json` is the live case: this
+        side strips the leading slash, `_cited_tokens` does not.
+        """
+        prr = pr_review
+        import os
+        f = {"file": "/data/huge.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"}
+        unread = {os.path.normpath("data/huge.json")}
+        body = prr.render([f], True, 0, head_sha="s" * 40, repo="x",
+                          excluded=["data/huge.json"])
+        held = prr._cited_tokens(body, prr._BLOCKING_LINE) & unread
+        _, demoted = prr._demote_unread_claims([f], ["data/huge.json"])
+        assert demoted and not held, (
+            "the demotion must be the wider side; if the dismissal ever holds "
+            "something this does not demote, that is the unclearable block")
+
+    def test_the_note_names_the_findings_OWN_file_when_that_is_the_unread_one(
+            self, pr_review):
+        """`cited` also holds the title's backticks, so the alphabetically
+        first match could name a path the finding is not about — telling the
+        reader the wrong file is why the severity dropped."""
+        body, _ = self._final(pr_review, [
+            {"file": "zz/mine.json", "line": 1, "severity": "high",
+             "title": "the `aa/other.json` map is stale", "detail": "d"},
+        ], ["zz/mine.json", "aa/other.json"])
+        assert "did not open `zz/mine.json`" in body, body
+
+    def test_the_note_falls_back_when_the_findings_own_file_WAS_read(
+            self, pr_review):
+        body, _ = self._final(pr_review, [
+            {"file": "src/app.py", "line": 1, "severity": "high",
+             "title": "the `aa/other.json` map is stale", "detail": "d"},
+        ], ["aa/other.json"])
+        assert "did not open `aa/other.json`" in body, body
+
+    def test_one_derivation_of_detail(self, pr_review):
+        """`render` draws it, `_finding_title` falls back to its first
+        sentence, and the demotion reads that heading. The demotion used to
+        call `_finding_title(f)` while `render` passed its own copy —
+        identical today, so a change to either would have diverged silently."""
+        prr = pr_review
+        f = {"file": "a.py", "line": 1, "severity": "high",
+             "detail": "  First `x/y.json` sentence.  Second one.  "}
+        body = prr.render([f], False, 0, head_sha="s" * 40, repo="x")
+        assert prr._finding_detail(f) in body
+        assert prr._finding_title(f) in prr._BLOCKING_LINE.findall(body)[0]
+
+    def test_a_finding_with_no_file_is_untouched(self, pr_review):
+        """`_where_link` renders `_the pull request_`, so a PR-level finding —
+        a missing ticket id, an unsigned agent commit — puts no path on the 🔴
+        line. It is not a claim about unread bytes and must keep its
+        severity."""
+        out, demoted = pr_review._demote_unread_claims(
+            [{"file": "", "severity": "high", "title": "no ticket id",
+              "detail": "d"}], ["data/huge.json"])
+        assert demoted == [] and out[0]["severity"] == "high"
+
+    def test_detail_alone_does_not_demote(self, pr_review):
+        """`detail` is not on the 🔴 line, so the dismissal never reads it
+        either. Demoting on it would make the two halves disagree again, in the
+        other direction, and would mute real findings for mentioning a big
+        file in prose."""
+        _, event = self._final(pr_review, [
+            {"file": "src/app.py", "line": 12, "severity": "high",
+             "title": "a real defect",
+             "detail": "this also loads `data/huge.json` at boot"},
+        ], ["data/huge.json"])
+        assert event == "REQUEST_CHANGES"
+
+    def test_the_demoted_list_reaches_the_caller(self, monkeypatch, pr_review):
+        """`_finalize_review` rebinds only its own local, so `main`'s log line
+        and the commit status reported the PRE-demotion severities — a run that
+        posted a 🔵 printed "1 high" and set a status to match."""
+        prr = pr_review
+        f = [{"file": "data/image-dims.json", "line": 1, "severity": "high",
+              "title": "t", "detail": "d"}]
+        out, demoted = prr._demote_unread_claims(f, ["data/image-dims.json"])
+        assert demoted == ["data/image-dims.json"]
+        assert prr.severity_breakdown(out) == prr.severity_breakdown(
+            [dict(f[0], severity="low")])
+        assert f[0]["severity"] == "high", "the input list must not be mutated"
+
+    def test_a_high_about_a_file_that_WAS_read_still_blocks(self, pr_review):
+        """The guard must not disarm the reviewer. Only the unread file's
+        finding moves."""
+        body, event = self._final(pr_review, [
+            {"file": "src/app.py", "line": 12, "severity": "high",
+             "title": "a real defect", "detail": "d"},
+        ], ["data/image-dims.json"])
+        assert event == "REQUEST_CHANGES", body
+
+    def test_a_nit_about_an_unread_file_is_left_alone(self, pr_review):
+        """Only `high` posts REQUEST_CHANGES, so only `high` is the authority
+        this takes away. Rewriting a 🔵 would be noise."""
+        body, _ = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "low",
+             "title": "t", "detail": "original detail"},
+        ], ["data/image-dims.json"])
+        assert "Severity lowered automatically" not in body
+
+    def test_nothing_excluded_changes_nothing(self, pr_review):
+        body, event = self._final(pr_review, [
+            {"file": "data/image-dims.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"},
+        ], [])
+        assert event == "REQUEST_CHANGES"
+        assert "Severity lowered automatically" not in body
+
+    def test_the_paths_are_compared_normalised(self, pr_review):
+        """`unopened` comes from the diff and the finding's `file` from the
+        model; `./a/b.json` and `a/b.json` are the same file."""
+        _, event = self._final(pr_review, [
+            {"file": "./data/image-dims.json", "line": 1, "severity": "high",
+             "title": "t", "detail": "d"},
+        ], ["data/image-dims.json"])
+        assert event != "REQUEST_CHANGES"

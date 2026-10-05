@@ -2560,6 +2560,161 @@ def _apply_withdrawals(body, event, findings, withdrawn):
     return body + _withdrawn_note(withdrawn), event
 
 
+def _finding_detail(f):
+    """A finding's detail, as it will be RENDERED.
+
+    One derivation, because three things need the same string: `render` draws
+    it, `_finding_title` falls back to its first sentence, and
+    `_demote_unread_claims` reads that heading to decide what the finding
+    cites. The demotion used to call `_finding_title(f)` while `render` called
+    `_finding_title(f, detail)` with its own copy — identical expressions
+    today, so they agreed, but a change to either side would have silently
+    reopened the divergence this whole helper exists to close. Raised by the
+    reviewer, which pointed out that the demotion was the one caller not
+    passing the value the renderer actually used.
+    """
+    return _defang_links(_unescape_backticks(f.get("detail")).strip())
+
+
+def _finding_title(f):
+    """The title this finding will RENDER with, synthesis included.
+
+    ONE DEFINITION, because two things read it: `render` draws it, and
+    `_demote_unread_claims` has to know which paths land on the 🔴 line — the
+    line `_dismiss_stale_block` later parses. Reading the raw `title` was not
+    the same question: `validate_findings` does not require one, and a finding
+    without it renders its first SENTENCE OF DETAIL as the heading. So
+
+        {"file": "src/app.py", "severity": "high",
+         "detail": "The `data/huge.json` map is stale."}
+
+    renders `🔴 **The `data/huge.json` map is stale.** — [`src/app.py:12`]`, the
+    dismissal reads both paths off it and refuses to clear, while a demotion
+    keyed on the raw (empty) title left the finding blocking. Not demoted so it
+    blocks, blind non-empty so it can never clear — the exact trap, reached
+    through the fallback rather than through a title the model wrote.
+    """
+    detail = _finding_detail(f)
+    title = _defang_links(str(f.get("title", "")).strip())
+    if title:
+        return title
+    # The model dropped `title` on a real run and rendered "(untitled)" four
+    # times; the heading is what makes a list scannable.
+    return re.split(r"(?<=[.!?])\s", detail)[0][:110] if detail else "(no detail)"
+
+
+def _demote_unread_claims(findings, excluded):
+    """A finding about a file this run never opened cannot be `high`.
+
+    caeli-marketing#519 blocked on a 🔴 that asserted what was in
+    `data/image-dims.json` — a file the SAME review body listed under "were NOT
+    opened". Measured at that head the test it predicted failing passed 10/10
+    and both ids it called absent were present. The file is over
+    `MAX_FILE_DIFF`, so no later pass could ever reach it either: the claim was
+    unfalsifiable by the reviewer, and because the head never moved
+    `_dismiss_stale_block` correctly refused to clear it. A human had to.
+
+    DECIDABLE FROM THE REVIEW'S OWN TWO HALVES — a finding names a file, the
+    caveat names the files nobody read — which is why this is arithmetic here
+    rather than something asked of the model. Both sides were already computed
+    and only ever compared AFTERWARDS, in the dismissal guard.
+
+    DEMOTED, NOT DROPPED. An unread file is not proof the finding is wrong, and
+    silently deleting it would hide a real defect the agent inferred from a
+    caller it did read. What it cannot do is BLOCK: `high` is the only severity
+    that posts REQUEST_CHANGES, and a blocking claim about unread bytes is an
+    authority the review has not earned. The note says which file and why, so
+    the author is not left guessing why a 🔴 reads as a nit.
+    """
+    def _key(path):
+        # LEADING SLASHES STRIPPED, which `os.path.normpath` keeps. The model
+        # sometimes writes `/data/huge.json` and `_where_link` renders that
+        # span verbatim, so an absolute-looking `file` matched nothing in the
+        # unread set and the finding kept its 🔴. Measured: `_cited_tokens`
+        # misses it too, so the dismissal still clears — this is a demotion
+        # MISS, not the undismissable trap. Widening only here is the safe
+        # direction; the dismissal guard is deployed and conservative, and
+        # making it stricter could clear a block it should keep.
+        return os.path.normpath(str(path or "")).lstrip("/")
+
+    unread = {_key(p) for p in (excluded or []) if p}
+    if not unread:
+        return findings, []
+    out, demoted = [], []
+    for f in findings:
+        path = _key(f.get("file"))
+        # A FINDING WITH NO `file` IS OUT OF SCOPE FOR BOTH HALVES, not covered
+        # by the claim below: `_where_link` renders `_the pull request_`, so
+        # the 🔴 line carries no path, the dismissal reads none either, and a
+        # PR-level finding (a missing ticket id, an unsigned agent commit) is
+        # not a claim about unread bytes in the first place.
+        #
+        # THE SAME TOKENS THE DISMISSAL WILL READ, AND DELIBERATELY A FEW MORE.
+        # `_key` strips a leading slash and `_cited_tokens` does not, so any
+        # token this side reads — the `file` field AND the title's backticks —
+        # can match an unread path that the dismissal would miss. A finding
+        # whose `file` is `/data/huge.json` demotes here and is invisible to
+        # the dismissal; so does one whose TITLE cites `/data/huge.json`. That asymmetry is on purpose and only runs one way:
+        # this side may demote something the dismissal would not have held, which
+        # costs a 🔴 that becomes a 🔵; the reverse — the dismissal holding a
+        # block this side left blocking — is the trap, and widening here is what
+        # prevents it. An earlier version of this comment claimed the two token
+        # sets were identical, which contradicted the note on `_key` six lines
+        # up. Raised by the reviewer, which asked which of the two was the whole
+        # story; this is.
+        #
+        # The shared part, which is where the trap actually lives: the two halves disagree
+        # about what "a claim about an unread file" is. `_dismiss_stale_block`
+        # intersects `_cited_tokens(body, _BLOCKING_LINE)` with the unread set,
+        # and the rendered 🔴 line is `**{title}** — [`{file}:{line}`](…)` —
+        # `detail` and `fix` are on their own lines and never reach it. So the
+        # only divergence is a path backticked in the TITLE, and it is the trap
+        # shape exactly: not demoted, so it blocks; blind non-empty, so it can
+        # never clear. Measured before fixing, with `data/huge.json` unread:
+        #
+        #   dismissal reads   ['data/huge.json', 'src/app.py']
+        #   demotion keyed on  src/app.py        -> BLOCKS and CANNOT CLEAR
+        #
+        # Widening here rather than narrowing the dismissal keeps that guard's
+        # conservatism and makes the undismissable case non-blocking instead.
+        cited = {path} | {_key(m.group(1))
+                          for m in _CITED.finditer(_finding_title(f))}
+        # DERIVED, NOT RESTATED. Which severities post REQUEST_CHANGES is
+        # `EVENT_BY_SEVERITY`'s fact, and `_blocking_pattern` already exists so
+        # the dismissal reads it from there rather than hardcoding 🔴. A second
+        # literal here puts the two halves back out of step the moment a
+        # `medium` entry lands — the dismissal would treat a 🟡 on an unread
+        # file as blocking and refuse to clear it, while this left it blocking.
+        blocks = EVENT_BY_SEVERITY.get(
+            normalize_severity(f.get("severity"))) == "REQUEST_CHANGES"
+        if (cited & unread) and blocks:
+            # THE FINDING'S OWN FILE FIRST. `cited` also holds the title's
+            # backticks, so the alphabetically-first match could name a path
+            # the finding is not about — telling the reader the wrong file is
+            # why the severity dropped. Falls back to the sorted set only when
+            # the finding's own file was read and a cited one was not.
+            hits = cited & unread
+            path = path if path in hits else sorted(hits)[0]
+            f = dict(f, severity="low")
+            f["detail"] = (f.get("detail") or "").rstrip() + (
+                f"\n\nSeverity lowered automatically: this review did not open "
+                f"`{path}`, so it cannot make a blocking claim about what is in "
+                f"it. The finding may still be right — check it against the "
+                f"file.")
+            demoted.append(path)
+        out.append(f)
+    # PRINTED HERE, NOT AT A CALL SITE. `main` demotes before logging the
+    # severity breakdown and `_finalize_review` demotes again so no caller can
+    # post a blocking claim about unread bytes — and when the caller printed
+    # it, the second call found nothing left to demote and the line fired ZERO
+    # times in a real run. One place, once per actual demotion.
+    if demoted:
+        print(f"  {len(demoted)} finding(s) lowered to low — a blocking claim "
+              f"about a file this run never opened: "
+              f"{', '.join(sorted(set(demoted)))}", flush=True)
+    return out, demoted
+
+
 def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
                      head_sha="", repo="", wire_fields=(), diff="",
                      excluded=(), saw_every_change=None, oversized=()):
@@ -2573,6 +2728,7 @@ def _finalize_review(findings, withdrawn, truncated=False, skipped=0,
     the thing that matters.
     """
     unseen = False
+    findings, _ = _demote_unread_claims(findings, excluded)
     body = (approval_body(head_sha, repo=repo, wire_fields=wire_fields, diff=diff,
                           excluded=excluded, oversized=oversized)
             if not findings
@@ -3581,12 +3737,8 @@ def render(findings, truncated, skipped, head_sha="", repo="", diff="",
         # GitHub renders `\\`` literally — so a finding that quotes code arrives
         # with visible backslashes through the one thing it most needs to show.
         # Seen on infra#106, where every code span in the review was `\\`${X}\\``.
-        detail = _defang_links(_unescape_backticks(f.get("detail")).strip())
-        title = _defang_links(str(f.get("title", "")).strip())
-        if not title:
-            # The model dropped `title` on a real run and rendered "(untitled)"
-            # four times; the heading is what makes a list scannable.
-            title = re.split(r"(?<=[.!?])\s", detail)[0][:110] if detail else "(no detail)"
+        detail = _finding_detail(f)
+        title = _finding_title(f)
         lines += [f"{ICON[sev]} **{title}** — {where}", detail, ""]
         lines += _fix_block(f)
     if len(findings) > MAX_FINDINGS:
@@ -4138,6 +4290,14 @@ def main():
     # on every multi-pass PR, and the "the base moved, this PR's own changes did
     # not" skip could never fire: every update-branch paid for a full multi-pass
     # review. Found by this reviewer on its own PR.
+    # DEMOTED HERE TOO, so the log line and the commit status report the
+    # severities that were POSTED. `_finalize_review` does this as well — it
+    # has to, so no caller can post a blocking claim about an unread file — but
+    # it rebinds only its own local, so a run that posted a 🔵 still printed
+    # "1 high" and set a status to match. The status is what a reader sees
+    # without opening the PR. Idempotent: the second pass sees `low` and
+    # changes nothing.
+    findings, _ = _demote_unread_claims(findings, unopened)
     body, event = _finalize_review(findings, withdrawn, truncated, skipped,
                                    head_sha=head_sha, repo=repo,
                                    wire_fields=wire_fields, diff=fingerprinted,
