@@ -1175,12 +1175,21 @@ RESTATEMENT_MIN_CHARS = 30
 
 def _finding_key(f):
     """What makes two findings EXACTLY the same one — file, line, and the
-    title reduced to its letters and spaces. Near-misses are caught separately
-    by `_is_restatement`, because two passes reaching one defect almost never
-    word it identically: one of them writes "The tally", the other "Tally"."""
+    HEADING THE READER SEES reduced to its letters and spaces. Near-misses are
+    caught separately by `_is_restatement`, because two passes reaching one
+    defect almost never word it identically: one writes "The tally", the other
+    "Tally".
+
+    `_finding_title`, not the raw field. `validate_findings` does not require a
+    title and `render` falls back to the first sentence of `detail`, so two
+    passes can reach one defect with one of them titling it and the other not
+    — and keyed on the raw field, the second one's key is the empty string,
+    which matches nothing and clears the length floor by failing it. The same
+    blind spot cost `_demote_unread_claims` a finding it could never demote.
+    """
     return (str(f.get("file") or "").strip().lower(),
             str(f.get("line") or ""),
-            re.sub(r"[^a-z0-9]+", " ", str(f.get("title") or "").lower()).strip())
+            re.sub(r"[^a-z0-9]+", " ", _finding_title(f).lower()).strip())
 
 
 def _is_restatement(a, b):
@@ -1207,6 +1216,53 @@ def _more_severe(a, b):
         RANK[normalize_severity(a.get("severity"))] else a
 
 
+def _collapse_into(kept, more):
+    """`kept`, with everything in `more` folded into it.
+
+    THE ONE PLACE THE RULE LIVES. Two callers need it — the pass loop, folding
+    every pass into one list, and the revision, folding its additions into the
+    findings it kept — and they had separate keys before, which is how the
+    weaker of the two came to miss a leading word.
+
+    A restatement is never deleted, it is MERGED: the entry it matches keeps
+    its position and takes the more severe of the two wordings. Deleting would
+    be the downgrade `_more_severe` exists to prevent, and it is the revision
+    path that makes that concrete — before the near-miss was caught at all,
+    its addition was simply posted, so a 🟡 addition against a 🔵 finding
+    carried the review's verdict.
+
+    Returns (merged, new, restated): the folded list, the entries of `more`
+    that were not already there, and how many were a re-wording rather than an
+    exact repeat.
+    """
+    out = list(kept)
+    seen, places = {}, collections.defaultdict(list)
+    for i, f in enumerate(out):
+        key = _finding_key(f)
+        seen.setdefault(key, i)
+        places[key[:2]].append((key[2], i))
+    new, restated = [], 0
+    for f in more:
+        key = _finding_key(f)
+        at = seen.get(key)
+        if at is None:
+            at = next((i for t, i in places[key[:2]]
+                       if _is_restatement(key[2], t)), None)
+            if at is not None:
+                restated += 1
+        if at is not None:
+            out[at] = _more_severe(out[at], f)
+            # THE KEPT WORDING IS NOW A MATCH TARGET TOO. A third pass can
+            # restate the replacement without resembling what it replaced.
+            places[key[:2]].append((key[2], at))
+            continue
+        seen[key] = len(out)
+        places[key[:2]].append((key[2], len(out)))
+        out.append(f)
+        new.append(f)
+    return out, new, restated
+
+
 def _dedupe_findings(findings):
     """One entry per defect, earliest position wins, most severe wording wins.
 
@@ -1220,27 +1276,7 @@ def _dedupe_findings(findings):
     one of the other six in different words. The old key held the whole title,
     so a leading "The" was enough to post the same nit twice.
     """
-    seen, places, out = {}, collections.defaultdict(list), []
-    restated = 0
-    for f in findings:
-        key = _finding_key(f)
-        if key in seen:
-            at = seen[key]
-            out[at] = _more_severe(out[at], f)
-            continue
-        place, title = key[:2], key[2]
-        at = next((i for t, i in places[place] if _is_restatement(title, t)),
-                  None)
-        if at is not None:
-            out[at] = _more_severe(out[at], f)
-            # THE KEPT WORDING IS NOW A MATCH TARGET TOO. A third pass can
-            # restate the replacement without resembling what it replaced.
-            places[place].append((title, at))
-            restated += 1
-            continue
-        seen[key] = len(out)
-        places[place].append((title, len(out)))
-        out.append(f)
+    out, _, restated = _collapse_into([], findings)
     if len(out) < len(findings):
         print(f"  {len(findings) - len(out)} duplicate finding(s) across "
               f"passes ({restated} a restatement rather than a repeat)",
@@ -2070,28 +2106,6 @@ number. On `edit`, send the fields you are changing; anything you omit keeps its
 current value. On `keep` and `drop`, `why` alone is enough."""
 
 
-def _not_already_said(added, kept):
-    """The additions that are not one of `kept` written again.
-
-    SAME TEST THE PASSES GET. This used to hold its own key — file, line, and
-    the title's first 60 letters — and a title that merely gained a leading
-    word slid past it, which is exactly the shape `_dedupe_findings` was
-    measured failing on. One rule, one place.
-    """
-    exact = {_finding_key(f) for f in kept}
-    titles = {}
-    for f in kept:
-        k = _finding_key(f)
-        titles.setdefault(k[:2], []).append(k[2])
-    out = []
-    for a in added:
-        k = _finding_key(a)
-        if k in exact:
-            continue
-        if any(_is_restatement(k[2], t) for t in titles.get(k[:2], ())):
-            continue
-        out.append(a)
-    return out
 
 
 #: The revision's answer shape, enforced by the provider rather than asked for.
@@ -2564,11 +2578,14 @@ def _revise(findings, work, repo):
             print(f"  additions unusable ({str(e)[:80]}) — ignoring them",
                   flush=True)
             added = []
-        added = _not_already_said(added, kept)
-    print(f"  revision: {len(kept)} kept, {len(withdrawn)} dropped, "
-          f"{len(added)} added ({stats.get('tool_calls', 0)} tool call(s))",
-          flush=True)
-    return kept + added, withdrawn
+        # FOLDED IN, NOT FILTERED OUT. An addition restating something kept
+        # can be the more severe wording of it, and dropping it would take the
+        # verdict with it. `_collapse_into` promotes the entry instead.
+        kept, added, _ = _collapse_into(kept, added)
+    print(f"  revision: {len(kept) - len(added)} kept, {len(withdrawn)} "
+          f"dropped, {len(added)} added "
+          f"({stats.get('tool_calls', 0)} tool call(s))", flush=True)
+    return kept, withdrawn
 
 
 def _withdrawn_note(withdrawn):

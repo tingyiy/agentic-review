@@ -126,6 +126,25 @@ class TestItAdds:
         kept, _ = pr._revise(long, "/tmp", "repo")
         assert len(kept) == 1
 
+    def test_a_more_severe_rewording_promotes_what_it_restates(
+            self, pr, monkeypatch):
+        """Found in review on this change. Before the near-miss was caught at
+        all, the addition was simply POSTED, so the review carried the 🟡 and
+        withheld approval. Filtering it out instead of folding it in would
+        have turned that into an APPROVE — the one direction `_more_severe`
+        exists to forbid."""
+        nit = [{"file": "f0.py", "line": 10, "severity": "low",
+                "detail": "d", "title": "Tally still counts six UNSUPPORTED "
+                "rows whose fixes the same file records as applied"}]
+        _armed(pr, monkeypatch, json.dumps({
+            "revisions": [{"index": 0, "action": "keep"}],
+            "additions": [{"file": "f0.py", "line": 10, "severity": "medium",
+                           "detail": "d", "title": "The tally still counts "
+                           "six UNSUPPORTED rows whose fixes the same file "
+                           "records as applied"}]}))
+        kept, _ = pr._revise(nit, "/tmp", "repo")
+        assert [f["severity"] for f in kept] == ["medium"]
+
     def test_a_different_defect_on_a_kept_line_is_still_added(
             self, pr, monkeypatch):
         """The filter is narrow on purpose: a second real defect at a line

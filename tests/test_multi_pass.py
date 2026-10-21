@@ -257,6 +257,21 @@ class TestTheSameDefectIsPostedOnce:
         kept = pr._dedupe_findings([nit, real])
         assert [f["severity"] for f in kept] == ["medium"]
 
+    def test_a_finding_with_no_title_is_still_a_restatement(self):
+        """Found in review on this change. `validate_findings` does not
+        require a title and `render` falls back to the first sentence of
+        `detail`, so one pass can title a defect and another not. Keyed on the
+        raw field the second one's key was "", which matches nothing — the
+        exact duplicate this collapse exists to catch, posted twice."""
+        titled = {"file": "a.py", "line": 7, "severity": "low",
+                  "title": "The parity case asserts the string exists in the "
+                           "file, not that it is the key the writer uses"}
+        untitled = {"file": "a.py", "line": 7, "severity": "low",
+                    "detail": "Parity case asserts the string exists in the "
+                              "file, not that it is the key the writer uses. "
+                              "It passes on a stale copy."}
+        assert len(pr._dedupe_findings([titled, untitled])) == 1
+
     def test_a_third_pass_restating_the_replacement_is_caught(self):
         """When a more severe wording takes the entry, the entry has two
         wordings a later pass can resemble, and only one of them is in the
