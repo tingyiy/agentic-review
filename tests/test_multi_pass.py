@@ -205,6 +205,107 @@ class TestTheSameDefectIsPostedOnce:
         assert pr._finding_key({"file": "a.py", "line": 1, "title": "Off-by-one!"}) \
             == pr._finding_key({"file": "A.py", "line": "1", "title": "off by one"})
 
+    def test_a_leading_word_is_not_a_second_finding(self, monkeypatch):
+        """caeli-marketing#625, verbatim. Three passes read the same article;
+        two of them reported this nit and the only difference was "The". Nine
+        findings were posted and three of them were another one re-worded."""
+        a = {"file": "factcheck.md", "line": 102, "severity": "low",
+             "title": "Tally still counts six UNSUPPORTED rows whose fixes "
+                      "the same file records as applied", "detail": "d"}
+        b = dict(a, title="The tally still counts six UNSUPPORTED rows whose "
+                          "fixes the same file records as applied")
+        seen = _Harness().run(monkeypatch, _blob("factcheck.md"),
+                              [_blob("b.py")], findings_per_pass=[[a], [b]])
+        assert seen["posted"].count("UNSUPPORTED rows") == 1
+
+    def test_two_defects_on_one_line_both_survive(self, monkeypatch):
+        """infra#317, verbatim: line 33 holds an EXIT trap that clobbers the
+        job's exit code AND an alert for a failure already reported. Same
+        file, same line, two defects — the ratio must not merge them."""
+        a = {"file": "regen.sh", "line": 33, "severity": "high", "detail": "d",
+             "title": "EXIT trap's `exit \"$rc\"` re-enters the trap and "
+                      "clobbers the job's exit code"}
+        b = {"file": "regen.sh", "line": 33, "severity": "medium", "detail": "d",
+             "title": "The trap posts to #cron-alerts for a job whose failure "
+                      "is already reported"}
+        seen = _Harness().run(monkeypatch, _blob("regen.sh"), [_blob("b.py")],
+                              findings_per_pass=[[a], [b]])
+        assert seen["posted"].count("re-enters the trap") == 1
+        assert seen["posted"].count("#cron-alerts") == 1
+
+    def test_a_short_title_is_never_matched_by_ratio(self, monkeypatch):
+        """Two names in one short sentence are 0.9 alike and are two
+        findings. The floor is what stops the ratio being asked at all."""
+        a = {"file": "a.py", "line": 7, "severity": "low", "detail": "d",
+             "title": "No test for foo"}
+        b = dict(a, title="No test for bar")
+        seen = _Harness().run(monkeypatch, _blob("a.py"), [_blob("b.py")],
+                              findings_per_pass=[[a], [b]])
+        assert seen["posted"].count("No test for ") == 2
+
+    def test_the_collapse_keeps_the_wording_that_withholds_more(self):
+        """browser-extension#534 posted this defect twice, once as 🟡 and once
+        as 🔵. Both were posted, so the review already withheld approval;
+        collapsing them onto the first pass's 🔵 would hand out an APPROVE
+        that nobody's review had earned."""
+        nit = {"file": "App.tsx", "line": 3120, "severity": "low",
+               "title": "panelScreenTop still reports pillTopPx while the "
+                        "panel's top is now panelTopPx"}
+        real = {"file": "App.tsx", "line": 3120, "severity": "medium",
+                "title": "panelScreenTop still sends pillTopPx while the "
+                         "panel's top is now panelTopPx"}
+        kept = pr._dedupe_findings([nit, real])
+        assert [f["severity"] for f in kept] == ["medium"]
+
+    def test_a_finding_with_no_title_is_still_a_restatement(self):
+        """Found in review on this change. `validate_findings` does not
+        require a title and `render` falls back to the first sentence of
+        `detail`, so one pass can title a defect and another not. Keyed on the
+        raw field the second one's key was "", which matches nothing — the
+        exact duplicate this collapse exists to catch, posted twice."""
+        titled = {"file": "a.py", "line": 7, "severity": "low",
+                  "title": "The parity case asserts the string exists in the "
+                           "file, not that it is the key the writer uses"}
+        untitled = {"file": "a.py", "line": 7, "severity": "low",
+                    "detail": "Parity case asserts the string exists in the "
+                              "file, not that it is the key the writer uses. "
+                              "It passes on a stale copy."}
+        assert len(pr._dedupe_findings([titled, untitled])) == 1
+
+    def test_a_third_pass_restating_the_replacement_is_caught(self):
+        """When a more severe wording takes the entry, the entry has two
+        wordings a later pass can resemble, and only one of them is in the
+        kept finding. Ratios here, which is why these exact sentences:
+        A-B 0.71, B-C 0.80, A-C 0.59 — C is a restatement of what was kept
+        and not of what it replaced."""
+        a = {"file": "a.mjs", "line": 60, "severity": "low", "detail": "d",
+             "title": "The config regex stops at the first closing brace "
+                      "inside the JSON object"}
+        b = {"file": "a.mjs", "line": 60, "severity": "high", "detail": "d",
+             "title": "Config regex stops at the first closing brace inside "
+                      "the JSON object, so a nested object truncates the "
+                      "gate's view of it"}
+        c = {"file": "a.mjs", "line": 60, "severity": "low", "detail": "d",
+             "title": "Config regex stops at the first closing brace, so a "
+                      "nested object truncates the gate's view of what it "
+                      "reads from the JSON"}
+        assert len(pr._dedupe_findings([a, b, c])) == 1
+
+    def test_the_earlier_position_is_the_one_kept(self):
+        """The more severe wording wins the entry; it does not win the
+        ordering. A finding must not jump the queue by being restated."""
+        first = {"file": "a.py", "line": 1, "severity": "low",
+                 "title": "The config regex stops at the first brace inside "
+                          "the JSON, so a nested object truncates it"}
+        second = dict(first, line=2, title="something else entirely here, "
+                                           "about a different line of code")
+        third = dict(first, severity="high",
+                     title="Config regex stops at the first brace inside the "
+                           "JSON, so a nested object truncates it")
+        kept = pr._dedupe_findings([first, second, third])
+        assert [f["line"] for f in kept] == [1, 2]
+        assert kept[0]["severity"] == "high"
+
 
 class TestTheClockStopsIt:
     def test_a_pass_is_not_started_past_the_deadline(self, monkeypatch):
