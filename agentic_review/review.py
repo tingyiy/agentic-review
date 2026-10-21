@@ -38,6 +38,8 @@ Usage:  pr-review.py <repo> <pr-number>          # posts the review
         DRY=1 pr-review.py <repo> <pr-number>     # prints it instead
 """
 import base64
+import collections
+import difflib
 import hashlib
 import json
 from functools import lru_cache
@@ -1151,32 +1153,97 @@ def _other_passes_note(n, parts):
             "any of them to check something this part depends on.]\n")
 
 
+#: How alike two titles at one line have to be before the second is the first
+#: one worded again rather than a second defect.
+#:
+#: MEASURED, not picked. Across 915 reviews this bot posted in eight repos
+#: (3,134 findings), 410 pairs of findings landed on the same file AND the same
+#: line. Reading every pair: at 0.60 and above they are one defect written
+#: twice by two passes ("Tally still counts six UNSUPPORTED rows…" against "The
+#: tally still counts six UNSUPPORTED rows…"), and below it they are different
+#: points that happen to share a line — an `exit` that re-enters its own trap
+#: and the alert that trap posts, both on `infra#317`'s line 33. 77 pairs
+#: collapse here.
+RESTATEMENT_RATIO = 0.60
+
+#: A ratio means nothing on a short title: "missing test for foo" and "missing
+#: test for bar" are 0.9 alike and are two findings. The shortest title among
+#: the 77 measured restatements normalises to 38 characters, so this floor
+#: costs none of them.
+RESTATEMENT_MIN_CHARS = 30
+
+
 def _finding_key(f):
-    """What makes two findings the same one. Deliberately coarse on the title:
-    two passes reaching the same defect from different files word it
-    differently, and the file and line are what a reader sees twice."""
+    """What makes two findings EXACTLY the same one — file, line, and the
+    title reduced to its letters and spaces. Near-misses are caught separately
+    by `_is_restatement`, because two passes reaching one defect almost never
+    word it identically: one of them writes "The tally", the other "Tally"."""
     return (str(f.get("file") or "").strip().lower(),
             str(f.get("line") or ""),
             re.sub(r"[^a-z0-9]+", " ", str(f.get("title") or "").lower()).strip())
 
 
+def _is_restatement(a, b):
+    """Whether two normalised titles at one place are one defect, worded twice.
+
+    Only ever asked about findings that already share a file and a line, which
+    is what makes a prose ratio safe to use at all.
+    """
+    if len(a) < RESTATEMENT_MIN_CHARS or len(b) < RESTATEMENT_MIN_CHARS:
+        return False
+    return difflib.SequenceMatcher(None, a, b).ratio() >= RESTATEMENT_RATIO
+
+
+def _more_severe(a, b):
+    """Of two wordings of one defect, the one that withholds more.
+
+    KEEPING THE FIRST WOULD BE A DOWNGRADE, not a tie-break. Before this
+    collapsed them both were posted, so the review already carried the higher
+    severity and already took the verdict that goes with it; dropping the 🟡
+    because a 🔵 pass reached the line first would quietly turn a review that
+    withheld approval into one that granted it.
+    """
+    return b if RANK[normalize_severity(b.get("severity"))] < \
+        RANK[normalize_severity(a.get("severity"))] else a
+
+
 def _dedupe_findings(findings):
-    """One entry per defect, first pass wins.
+    """One entry per defect, earliest position wins, most severe wording wins.
 
     Passes share the repository and the conversation, so two of them can reach
     the same line — the second pass opening a file the first already reported
     on is the normal case, not an edge one. Posting it twice reads as two
     defects.
+
+    Measured on caeli-marketing#625, which is why the match is no longer exact:
+    of nine findings posted in one review, three were a second pass restating
+    one of the other six in different words. The old key held the whole title,
+    so a leading "The" was enough to post the same nit twice.
     """
-    seen, out = set(), []
+    seen, places, out = {}, collections.defaultdict(list), []
+    restated = 0
     for f in findings:
         key = _finding_key(f)
         if key in seen:
+            at = seen[key]
+            out[at] = _more_severe(out[at], f)
             continue
-        seen.add(key)
+        place, title = key[:2], key[2]
+        at = next((i for t, i in places[place] if _is_restatement(title, t)),
+                  None)
+        if at is not None:
+            out[at] = _more_severe(out[at], f)
+            # THE KEPT WORDING IS NOW A MATCH TARGET TOO. A third pass can
+            # restate the replacement without resembling what it replaced.
+            places[place].append((title, at))
+            restated += 1
+            continue
+        seen[key] = len(out)
+        places[place].append((title, len(out)))
         out.append(f)
     if len(out) < len(findings):
-        print(f"  {len(findings) - len(out)} duplicate finding(s) across passes",
+        print(f"  {len(findings) - len(out)} duplicate finding(s) across "
+              f"passes ({restated} a restatement rather than a repeat)",
               flush=True)
     return out
 
@@ -2003,16 +2070,28 @@ number. On `edit`, send the fields you are changing; anything you omit keeps its
 current value. On `keep` and `drop`, `why` alone is enough."""
 
 
-def _dedupe_key(f):
-    """What makes two findings the same finding.
+def _not_already_said(added, kept):
+    """The additions that are not one of `kept` written again.
 
-    File and line alone are too coarse — two real defects share a line often
-    enough — and the title is model prose that varies between passes, so it is
-    reduced to its letters. Together they catch a restatement without merging
-    genuinely different points at the same place.
+    SAME TEST THE PASSES GET. This used to hold its own key — file, line, and
+    the title's first 60 letters — and a title that merely gained a leading
+    word slid past it, which is exactly the shape `_dedupe_findings` was
+    measured failing on. One rule, one place.
     """
-    title = re.sub(r"[^a-z0-9]+", "", str(f.get("title", "")).lower())[:60]
-    return (str(f.get("file", "")), str(f.get("line", "")), title)
+    exact = {_finding_key(f) for f in kept}
+    titles = {}
+    for f in kept:
+        k = _finding_key(f)
+        titles.setdefault(k[:2], []).append(k[2])
+    out = []
+    for a in added:
+        k = _finding_key(a)
+        if k in exact:
+            continue
+        if any(_is_restatement(k[2], t) for t in titles.get(k[:2], ())):
+            continue
+        out.append(a)
+    return out
 
 
 #: The revision's answer shape, enforced by the provider rather than asked for.
@@ -2485,8 +2564,7 @@ def _revise(findings, work, repo):
             print(f"  additions unusable ({str(e)[:80]}) — ignoring them",
                   flush=True)
             added = []
-        seen = {_dedupe_key(f) for f in kept}
-        added = [a for a in added if _dedupe_key(a) not in seen]
+        added = _not_already_said(added, kept)
     print(f"  revision: {len(kept)} kept, {len(withdrawn)} dropped, "
           f"{len(added)} added ({stats.get('tool_calls', 0)} tool call(s))",
           flush=True)

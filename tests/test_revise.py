@@ -110,6 +110,38 @@ class TestItAdds:
         kept, _ = pr._revise(_findings(), "/tmp", "repo")
         assert len(kept) == 2
 
+    def test_a_reworded_addition_is_not_added_twice(self, pr, monkeypatch):
+        """The addition filter held its own key — file, line and the title's
+        first 60 letters — so a title that merely gained a leading word slid
+        past it. It asks the same question the passes do now."""
+        long = [{"file": "f0.py", "line": 10, "severity": "high",
+                 "detail": "d", "title": "Tally still counts six UNSUPPORTED "
+                 "rows whose fixes the same file records as applied"}]
+        _armed(pr, monkeypatch, json.dumps({
+            "revisions": [{"index": 0, "action": "keep"}],
+            "additions": [{"file": "f0.py", "line": 10, "severity": "high",
+                           "detail": "d", "title": "The tally still counts "
+                           "six UNSUPPORTED rows whose fixes the same file "
+                           "records as applied"}]}))
+        kept, _ = pr._revise(long, "/tmp", "repo")
+        assert len(kept) == 1
+
+    def test_a_different_defect_on_a_kept_line_is_still_added(
+            self, pr, monkeypatch):
+        """The filter is narrow on purpose: a second real defect at a line
+        that already carries a finding is the case infra#317 produced."""
+        long = [{"file": "f0.py", "line": 10, "severity": "high",
+                 "detail": "d", "title": "EXIT trap's exit $rc re-enters the "
+                 "trap and clobbers the job's exit code"}]
+        _armed(pr, monkeypatch, json.dumps({
+            "revisions": [{"index": 0, "action": "keep"}],
+            "additions": [{"file": "f0.py", "line": 10, "severity": "medium",
+                           "detail": "d", "title": "The trap posts to "
+                           "#cron-alerts for a job whose failure is already "
+                           "reported elsewhere"}]}))
+        kept, _ = pr._revise(long, "/tmp", "repo")
+        assert len(kept) == 2
+
     def test_a_malformed_addition_does_not_lose_the_kept_findings(
             self, pr, monkeypatch):
         _armed(pr, monkeypatch, json.dumps({
