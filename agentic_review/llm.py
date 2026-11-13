@@ -192,6 +192,24 @@ def _is_edge_block(code, body):
     return code in (403, 401) and bool(_EDGE_BLOCK.search(body or ""))
 
 
+#: A MODEL THE PROVIDER SAYS IT DOES NOT HAVE, during an outage of its own.
+#: caeli-marketing#746, 2026-11-13 19:36 UTC: turn 1 came back `404: Model not
+#: found, inaccessible, and/or not deployed` for deepseek-v4p1-flash, which
+#: Fireworks' `/models` listed and served 200 three times out of three
+#: minutes later. The 4xx rule called it our payload and the review died on
+#: turn 1 with OpenRouter healthy.
+#:
+#: The same body is what a mistyped id gets, and failing over on THAT would
+#: be the waste the 4xx rule exists to prevent. It cannot be: a model only
+#: fails over through `FAILOVER_MODEL_MAP`, so an id nobody mapped still
+#: raises — `_with_failover` refuses with "no failover mapping".
+_MODEL_GONE = re.compile(r"model not found|not deployed", re.I)
+
+
+def _is_model_gone(code, body):
+    return code == 404 and bool(_MODEL_GONE.search(body or ""))
+
+
 def model_label(model=None):
     """The bare model name, for report text that must not go stale.
 
@@ -422,7 +440,10 @@ def _post(url, key, payload, timeout, provider, model):
         # Matched on the body, not the status: a genuine 403 from the API
         # (revoked key, model not enabled) must still fail loudly rather than
         # spend a second provider's budget discovering the same thing.
-        if e.code >= 500 or e.code == 429 or _is_edge_block(e.code, detail):
+        #
+        # AND A MODEL THE PROVIDER CLAIMS NOT TO HAVE — see `_MODEL_GONE`.
+        if (e.code >= 500 or e.code == 429 or _is_edge_block(e.code, detail)
+                or _is_model_gone(e.code, detail)):
             raise _Retryable(f"{provider} {model} -> {e.code}: {detail}")
         raise ReviewError(f"{provider} {model} -> {e.code}: {detail}")
     except urllib.error.URLError as e:
