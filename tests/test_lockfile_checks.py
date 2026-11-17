@@ -331,3 +331,17 @@ class TestTheOtherTwoExits:
         monkeypatch.delenv("DRY", raising=False)
         pr.main()
         assert "posted" not in seen, "re-posted a finding nothing had changed about"
+
+
+class TestMainAsksTheBoard:
+    """`ticket_not_started` is only reachable if `main` hands `run_all` a
+    fetcher — a tested check plus a caller that forgets the argument is a
+    check that never runs in production."""
+
+    _drive = TestItReachesTheReview._drive
+
+    def test_a_to_do_ticket_reaches_the_posted_review(self, monkeypatch):
+        monkeypatch.setattr(pr.tracker, "fetch", lambda k: {
+            "status": "To Do", "status_category": "new"})
+        seen = self._drive(monkeypatch, "--- a/x\n+++ b/x\n@@\n+x\n", {})
+        assert "ticket not moved to In Progress (SCRUM-1)" in seen["body"]

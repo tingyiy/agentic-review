@@ -161,6 +161,7 @@ default:
 | `REVIEW_MODEL` | `deepseek-v4p1-flash` | any OpenAI-shaped model |
 | `REVIEW_TICKET_PATTERN` | `[A-Z][A-Z0-9]+-\d+` | empty disables the title check |
 | `REVIEW_JIRA_SITE` | *(unset)* | empty disables ticket context |
+| `REVIEW_REQUIRE_TICKET_STARTED` | `1` | `0` disables the 🟡 for a title ticket still in Jira's *To Do* status category; needs the tracker configured |
 | `REVIEW_CONVENTION_DOCS` | `CLAUDE.md,AGENTS.md,CONTRIBUTING.md,README.md` | what counts as the rules |
 | `REVIEW_AGENT_TIMEOUT` | `900` | wall clock for one pass |
 | `REVIEW_ALERT_COMMAND` | *(unset)* | shell command that receives failures on stdin |
