@@ -170,9 +170,9 @@ def ticket_not_started(title, fetch):
     """
     if not REQUIRE_TICKET_STARTED or _TICKET_IN_TITLE is None:
         return []
-    # Same extraction and cap as `build_context`, which already fetched these
-    # same keys for the prompt. `tracker.ticket_ids` is pure; only `fetch` talks
-    # to the network.
+    # Same extraction and cap as `build_context`. The KEYS match; the fetch is
+    # repeated, not shared (`tracker.fetch` has no cache) — one extra request
+    # per title ticket, which is cheaper than threading tickets through here.
     keys = tracker.ticket_ids(title)[:tracker.MAX_TICKETS]
     out = []
     for key in keys:

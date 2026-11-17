@@ -4044,10 +4044,22 @@ _METADATA_FINDINGS = ("PR title does not name a ticket",
                       "ticket not moved to In Progress")
 
 
+def _fetch_or_unchanged(key):
+    """`tracker.fetch`, except an unreadable ticket is presumed UNMOVED.
+
+    Here the question is "has the finding been fixed?", not "should it be
+    raised?" — and `fetch` returns None for a tracker outage exactly as it does
+    for a ticket it cannot see. Read as "no finding", a Jira blip on a
+    re-request counted as the fix, re-ran the review and posted it clean for a
+    ticket nobody moved. No evidence of a fix is not a fix.
+    """
+    return tracker.fetch(key) or {"status": "unreadable", "status_category": "new"}
+
+
 def _metadata_findings_now(title, commits, body):
     return {f["title"].split(" (")[0] for f in
             checks.ticket_in_title(title)
-            + checks.ticket_not_started(title, tracker.fetch)
+            + checks.ticket_not_started(title, _fetch_or_unchanged)
             + checks.agent_session_url(commits, body)}
 
 

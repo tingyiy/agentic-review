@@ -427,6 +427,16 @@ class TestAFixedMetadataFindingIsNotSkipped:
         assert rv._already_reviewed("r", 1, "a" * 40, "d",
                                     title="SCRUM-7 x") is not None
 
+    def test_a_tracker_outage_is_not_the_fix(self, rv, monkeypatch):
+        """`fetch` returns None for an outage as for a missing ticket. Read as
+        "no finding", a Jira blip on a re-request cleared the 🟡 and posted a
+        clean review for a ticket nobody moved."""
+        last = dict(self.LAST, body="🟡 **ticket not moved to In Progress (SCRUM-7)**")
+        self._arm(rv, monkeypatch, last)
+        monkeypatch.setattr(rv.tracker, "fetch", lambda k: None)
+        assert rv._already_reviewed("r", 1, "a" * 40, "d",
+                                    title="SCRUM-7 x") is not None
+
     def test_a_review_with_no_metadata_finding_skips_as_before(self, rv, monkeypatch):
         last = dict(self.LAST, body="🔵 **something about the code**")
         self._arm(rv, monkeypatch, last)
