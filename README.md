@@ -118,8 +118,9 @@ failure was.
    latency, finish reason.
 6. If it found nothing, asks it to show its work before approving.
 7. Scores its own findings and drops the ones it cannot stand behind.
-8. Adds the deterministic checks — ticket id in the title, a session link on
-   agent-written commits, oversized convention docs.
+8. Adds the deterministic checks — ticket id in the title, that ticket moved
+   out of *To Do* on the tracker, a session link on agent-written commits,
+   oversized convention docs.
 9. Posts one review, with each finding linked to the exact blob it read.
 
 ## Install
@@ -161,6 +162,7 @@ default:
 | `REVIEW_MODEL` | `deepseek-v4p1-flash` | any OpenAI-shaped model |
 | `REVIEW_TICKET_PATTERN` | `[A-Z][A-Z0-9]+-\d+` | empty disables the title check |
 | `REVIEW_JIRA_SITE` | *(unset)* | empty disables ticket context |
+| `REVIEW_REQUIRE_TICKET_STARTED` | `1` | `0` disables the 🟡 for a title ticket still in Jira's *To Do* status category; needs the tracker configured |
 | `REVIEW_CONVENTION_DOCS` | `CLAUDE.md,AGENTS.md,CONTRIBUTING.md,README.md` | what counts as the rules |
 | `REVIEW_AGENT_TIMEOUT` | `900` | wall clock for one pass |
 | `REVIEW_ALERT_COMMAND` | *(unset)* | shell command that receives failures on stdin |

@@ -128,6 +128,12 @@ def fetch(key):
         "key": key,
         "summary": fields.get("summary") or "",
         "status": ((fields.get("status") or {}).get("name") or ""),
+        # Jira's own three buckets — `new`, `indeterminate`, `done` — that every
+        # workflow's custom status names map onto. The NAME is per-team ("To
+        # Do", "Backlog", "Open", "Selected for Development"); the category is
+        # not, so it is the only thing a check can key on without config.
+        "status_category": (((fields.get("status") or {})
+                             .get("statusCategory") or {}).get("key") or ""),
         "type": ((fields.get("issuetype") or {}).get("name") or ""),
         "description": _text(fields.get("description"))[:MAX_DESCRIPTION],
         "comments": [

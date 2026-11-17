@@ -251,6 +251,26 @@ class TestTrackerRender:
         assert tracker.render([None]) == ""
 
 
+class TestTrackerFetchStatusCategory:
+    """The not-started check keys on Jira's status CATEGORY. This is the one
+    place it is read out of the REST payload, so a wrong path here silences the
+    check everywhere — every ticket would look like 'unknown'."""
+
+    def test_the_category_key_is_read_from_the_status(self, monkeypatch):
+        monkeypatch.setattr(tracker, "available", lambda: True)
+        monkeypatch.setattr(tracker, "_get", lambda path: {"fields": {
+            "summary": "s", "status": {"name": "Backlog",
+                                       "statusCategory": {"key": "new", "name": "To Do"}}}})
+        t = tracker.fetch("SCRUM-1")
+        assert t["status"] == "Backlog"
+        assert t["status_category"] == "new"
+
+    def test_a_status_with_no_category_is_empty_not_a_crash(self, monkeypatch):
+        monkeypatch.setattr(tracker, "available", lambda: True)
+        monkeypatch.setattr(tracker, "_get", lambda path: {"fields": {"status": {"name": "x"}}})
+        assert tracker.fetch("SCRUM-1")["status_category"] == ""
+
+
 class TestADFText:
     def test_it_flattens_a_real_description(self):
         doc = {"type": "doc", "content": [

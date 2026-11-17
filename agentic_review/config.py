@@ -64,6 +64,11 @@ TICKET_PATTERN = os.environ.get("REVIEW_TICKET_PATTERN", r"[A-Z][A-Z0-9]+-\d+")
 #: and of any ticket the PR body mentions. Empty disables tracker context.
 JIRA_SITE = os.environ.get("REVIEW_JIRA_SITE", "")
 
+#: Flag a PR whose title ticket is still in the tracker's not-started bucket
+#: (Jira status category `new`: To Do, Backlog, …). Set to `0` to disable.
+#: Needs the tracker configured; without it there is no status to read.
+REQUIRE_TICKET_STARTED = os.environ.get("REVIEW_REQUIRE_TICKET_STARTED", "1") != "0"
+
 #: Files whose contents are handed to the reviewer verbatim, in this order,
 #: when they exist at the repository root or beside a changed file.
 #: The commit-status context the reviewer sets on the PR head (pending while it

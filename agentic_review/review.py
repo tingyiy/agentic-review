@@ -4037,13 +4037,37 @@ def _someone_replied_since(repo, pr, when):
 #: anything the author does. browser-extension#362: title fixed one minute
 #: after the review, three later runs, all skipped as "this exact commit
 #: already has a review", stale 🟡 forever.
+#: The board status is in the same position: moving the ticket changes neither
+#: the commit nor the diff.
 _METADATA_FINDINGS = ("PR title does not name a ticket",
-                      "agent-written commit with no session link")
+                      "agent-written commit with no session link",
+                      "ticket not moved to In Progress")
+
+
+def _fetch_or_unchanged(key):
+    """`tracker.fetch`, except an unreadable ticket is presumed UNMOVED.
+
+    Here the question is "has the finding been fixed?", not "should it be
+    raised?" — and `fetch` returns None for a tracker outage exactly as it does
+    for a ticket it cannot see. Read as "no finding", a Jira blip on a
+    re-request counted as the fix, re-ran the review and posted it clean for a
+    ticket nobody moved. No evidence of a fix is not a fix.
+
+    A tracker that is NOT CONFIGURED is different: it will never answer, so the
+    finding could never clear by moving the ticket — only by a push, the dead
+    end browser-extension#362 removed. That case returns the real None.
+    """
+    t = tracker.fetch(key)
+    if t is None and tracker.available():
+        return {"status": "unreadable", "status_category": "new"}
+    return t
 
 
 def _metadata_findings_now(title, commits, body):
     return {f["title"].split(" (")[0] for f in
-            checks.ticket_in_title(title) + checks.agent_session_url(commits, body)}
+            checks.ticket_in_title(title)
+            + checks.ticket_not_started(title, _fetch_or_unchanged)
+            + checks.agent_session_url(commits, body)}
 
 
 def _already_reviewed(repo, pr, head_sha, diff, title="", commits=(), body="",
@@ -4344,6 +4368,7 @@ def main():
         findings += checks.run_all(work, changed, title=meta.get("title") or "",
                                    commits=commit_messages(repo, pr),
                                    pr_body=meta.get("body") or "", diff=whole,
+                                   fetch_ticket=tracker.fetch,
                                    # Skipped for the model, read here: nobody
                                    # else looks at a lockfile at all.
                                    # Already computed before the early

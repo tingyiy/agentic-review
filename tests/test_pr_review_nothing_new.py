@@ -409,6 +409,45 @@ class TestAFixedMetadataFindingIsNotSkipped:
             commits=["Fix\n\nCo-Authored-By: Claude Opus 5 <x>\n"
                      "Claude-Session: session_01AbCdEfGhIj"]) is None
 
+    def test_a_ticket_moved_to_in_progress_since_means_review_again(self, rv, monkeypatch):
+        """Moving the ticket changes neither the commit nor the diff — without
+        this the finding could never be cleared by doing what it asked."""
+        last = dict(self.LAST, body="🟡 **ticket not moved to In Progress (SCRUM-7)**")
+        self._arm(rv, monkeypatch, last)
+        monkeypatch.setattr(rv.tracker, "fetch", lambda k: {
+            "status": "In Progress", "status_category": "indeterminate"})
+        assert rv._already_reviewed("r", 1, "a" * 40, "d",
+                                    title="SCRUM-7 x") is None
+
+    def test_a_ticket_still_to_do_is_still_a_skip(self, rv, monkeypatch):
+        last = dict(self.LAST, body="🟡 **ticket not moved to In Progress (SCRUM-7)**")
+        self._arm(rv, monkeypatch, last)
+        monkeypatch.setattr(rv.tracker, "fetch", lambda k: {
+            "status": "To Do", "status_category": "new"})
+        assert rv._already_reviewed("r", 1, "a" * 40, "d",
+                                    title="SCRUM-7 x") is not None
+
+    def test_a_tracker_outage_is_not_the_fix(self, rv, monkeypatch):
+        """`fetch` returns None for an outage as for a missing ticket. Read as
+        "no finding", a Jira blip on a re-request cleared the 🟡 and posted a
+        clean review for a ticket nobody moved."""
+        last = dict(self.LAST, body="🟡 **ticket not moved to In Progress (SCRUM-7)**")
+        self._arm(rv, monkeypatch, last)
+        monkeypatch.setattr(rv.tracker, "fetch", lambda k: None)
+        monkeypatch.setattr(rv.tracker, "available", lambda: True)
+        assert rv._already_reviewed("r", 1, "a" * 40, "d",
+                                    title="SCRUM-7 x") is not None
+
+    def test_a_tracker_switched_off_lets_the_finding_go(self, rv, monkeypatch):
+        """Unconfigured never answers; holding the finding would leave the
+        author no lever but a push."""
+        last = dict(self.LAST, body="🟡 **ticket not moved to In Progress (SCRUM-7)**")
+        self._arm(rv, monkeypatch, last)
+        monkeypatch.setattr(rv.tracker, "fetch", lambda k: None)
+        monkeypatch.setattr(rv.tracker, "available", lambda: False)
+        assert rv._already_reviewed("r", 1, "a" * 40, "d",
+                                    title="SCRUM-7 x") is None
+
     def test_a_review_with_no_metadata_finding_skips_as_before(self, rv, monkeypatch):
         last = dict(self.LAST, body="🔵 **something about the code**")
         self._arm(rv, monkeypatch, last)
