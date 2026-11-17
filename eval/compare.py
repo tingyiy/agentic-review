@@ -239,7 +239,8 @@ def run_ours(repo, pr, at=None):
         findings, withdrawn = review._revise(findings, work, repo)
         findings += checks.run_all(work, changed, title=meta.get("title") or "",
                                    commits=review.commit_messages(repo, pr),
-                                   pr_body=meta.get("body") or "")
+                                   pr_body=meta.get("body") or "",
+                                   fetch_ticket=tracker.fetch)
     return {
         "repo": repo, "pr": pr, "head": head, "title": meta.get("title", ""),
         "at_baseline": bool(at) and at != meta["head"]["sha"],

@@ -19,6 +19,7 @@ import pathlib
 import re
 import subprocess
 
+from . import tracker
 from .config import REQUIRE_TICKET_STARTED, TICKET_PATTERN
 
 #: claudelint's default. Past it, Claude Code warns about degraded performance
@@ -169,10 +170,10 @@ def ticket_not_started(title, fetch):
     """
     if not REQUIRE_TICKET_STARTED or _TICKET_IN_TITLE is None:
         return []
-    keys = []
-    for k in _TICKET_IN_TITLE.findall(title or ""):
-        if k not in keys:
-            keys.append(k)
+    # Same extraction and cap as `build_context`, which already fetched these
+    # same keys for the prompt. `tracker.ticket_ids` is pure; only `fetch` talks
+    # to the network.
+    keys = tracker.ticket_ids(title)[:tracker.MAX_TICKETS]
     out = []
     for key in keys:
         t = fetch(key)

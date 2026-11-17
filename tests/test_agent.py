@@ -698,6 +698,28 @@ class TestTheHarnessRunsTheRealPipeline:
         for gone in ("_reflect", "_second_look", "_add_fixes"):
             assert not hasattr(review, gone)
 
+    def test_the_harness_hands_run_all_the_ticket_fetcher(self, monkeypatch):
+        """`main` passes `fetch_ticket`; a harness that does not can never show
+        the not-started finding moving in either direction."""
+        import json as _json
+        from agentic_review import review, tracker
+        from eval import compare
+        seen = {}
+        monkeypatch.setattr(review, "gh", lambda *a, **k: _json.dumps(
+            {"head": {"sha": "a" * 40}, "base": {"sha": "b" * 40},
+             "title": "SCRUM-1 x", "body": ""}))
+        monkeypatch.setattr(review, "pr_diff",
+                            lambda *a: ("--- a/x\n+++ b/x\n@@\n", False, 0))
+        monkeypatch.setattr(review, "checkout", lambda *a: None)
+        monkeypatch.setattr(review, "build_context", lambda *a: "")
+        monkeypatch.setattr(review, "commit_messages", lambda *a: [])
+        monkeypatch.setattr(review, "review_findings", lambda *a, **k: [])
+        monkeypatch.setattr(review, "_revise", lambda f, w, r: (f, []))
+        monkeypatch.setattr(review.checks, "run_all",
+                            lambda *a, **k: seen.update(k) or [])
+        compare.run_ours("repo", 1)
+        assert seen.get("fetch_ticket") is tracker.fetch
+
 
 class TestAResumedPassGetsItsOwnRoom:
     """caeli-marketing#212 at a 240k budget: the review pass was forced by the

@@ -103,6 +103,14 @@ class TestTicketNotStarted:
         assert fetch.seen == ["SCRUM-1", "SCRUM-2"]
         assert len(out) == 2
 
+    def test_no_more_than_the_context_cap_are_fetched(self):
+        """A title listing ten tickets is a release note; each fetch can take
+        30s, and `_metadata_findings_now` pays it again on a re-run."""
+        fetch = self._fetch()
+        title = " ".join(f"SCRUM-{n}" for n in range(1, 11))
+        checks.ticket_not_started(title, fetch)
+        assert len(fetch.seen) == checks.tracker.MAX_TICKETS
+
     def test_it_can_be_switched_off(self, monkeypatch):
         monkeypatch.setattr(checks, "REQUIRE_TICKET_STARTED", False)
         fetch = self._fetch(**{"SCRUM-7": {"status": "To Do", "status_category": "new"}})
