@@ -118,8 +118,9 @@ failure was.
    latency, finish reason.
 6. If it found nothing, asks it to show its work before approving.
 7. Scores its own findings and drops the ones it cannot stand behind.
-8. Adds the deterministic checks — ticket id in the title, a session link on
-   agent-written commits, oversized convention docs.
+8. Adds the deterministic checks — ticket id in the title, that ticket moved
+   out of *To Do* on the tracker, a session link on agent-written commits,
+   oversized convention docs.
 9. Posts one review, with each finding linked to the exact blob it read.
 
 ## Install

@@ -434,8 +434,19 @@ class TestAFixedMetadataFindingIsNotSkipped:
         last = dict(self.LAST, body="🟡 **ticket not moved to In Progress (SCRUM-7)**")
         self._arm(rv, monkeypatch, last)
         monkeypatch.setattr(rv.tracker, "fetch", lambda k: None)
+        monkeypatch.setattr(rv.tracker, "available", lambda: True)
         assert rv._already_reviewed("r", 1, "a" * 40, "d",
                                     title="SCRUM-7 x") is not None
+
+    def test_a_tracker_switched_off_lets_the_finding_go(self, rv, monkeypatch):
+        """Unconfigured never answers; holding the finding would leave the
+        author no lever but a push."""
+        last = dict(self.LAST, body="🟡 **ticket not moved to In Progress (SCRUM-7)**")
+        self._arm(rv, monkeypatch, last)
+        monkeypatch.setattr(rv.tracker, "fetch", lambda k: None)
+        monkeypatch.setattr(rv.tracker, "available", lambda: False)
+        assert rv._already_reviewed("r", 1, "a" * 40, "d",
+                                    title="SCRUM-7 x") is None
 
     def test_a_review_with_no_metadata_finding_skips_as_before(self, rv, monkeypatch):
         last = dict(self.LAST, body="🔵 **something about the code**")

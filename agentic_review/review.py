@@ -4052,8 +4052,15 @@ def _fetch_or_unchanged(key):
     for a ticket it cannot see. Read as "no finding", a Jira blip on a
     re-request counted as the fix, re-ran the review and posted it clean for a
     ticket nobody moved. No evidence of a fix is not a fix.
+
+    A tracker that is NOT CONFIGURED is different: it will never answer, so the
+    finding could never clear by moving the ticket — only by a push, the dead
+    end browser-extension#362 removed. That case returns the real None.
     """
-    return tracker.fetch(key) or {"status": "unreadable", "status_category": "new"}
+    t = tracker.fetch(key)
+    if t is None and tracker.available():
+        return {"status": "unreadable", "status_category": "new"}
+    return t
 
 
 def _metadata_findings_now(title, commits, body):
