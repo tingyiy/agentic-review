@@ -47,6 +47,73 @@ class TestTicketInTitle:
         assert len(checks.ticket_in_title(None)) == 1
 
 
+class TestTicketNotStarted:
+    """Tingyi, 2026-11-16: a PR open against a ticket still in To Do reads, on
+    the board, as work nobody has started."""
+
+    @staticmethod
+    def _fetch(**by_key):
+        seen = []
+
+        def fetch(key):
+            seen.append(key)
+            return by_key.get(key)
+        fetch.seen = seen
+        return fetch
+
+    def test_a_to_do_ticket_is_a_finding(self):
+        fetch = self._fetch(**{"SCRUM-7": {"status": "To Do", "status_category": "new"}})
+        f, = checks.ticket_not_started("SCRUM-7 add the thing", fetch)
+        assert f["severity"] == "medium"
+        assert f["title"] == "ticket not moved to In Progress (SCRUM-7)"
+        # The author sees what the board actually says.
+        assert "'To Do'" in f["detail"]
+
+    def test_the_category_decides_not_the_name(self):
+        """A team's "Backlog" or "Selected for Development" is still not
+        started; a team's "Doing" is started. Names are per-team."""
+        assert checks.ticket_not_started("SCRUM-7 x", self._fetch(
+            **{"SCRUM-7": {"status": "Selected for Development", "status_category": "new"}}))
+        assert checks.ticket_not_started("SCRUM-7 x", self._fetch(
+            **{"SCRUM-7": {"status": "To Do", "status_category": "indeterminate"}})) == []
+
+    def test_in_progress_and_done_are_silent(self):
+        for cat in ("indeterminate", "done"):
+            fetch = self._fetch(**{"SCRUM-7": {"status": "x", "status_category": cat}})
+            assert checks.ticket_not_started("SCRUM-7 x", fetch) == []
+
+    def test_an_unreadable_ticket_is_not_a_finding(self):
+        """Tracker off, a 404, an outage: `fetch` returns None. No evidence, no
+        claim — and a missing category is the same as no ticket."""
+        assert checks.ticket_not_started("SCRUM-7 x", self._fetch()) == []
+        assert checks.ticket_not_started("SCRUM-7 x", self._fetch(
+            **{"SCRUM-7": {"status": "To Do"}})) == []
+
+    def test_only_the_title_is_read_not_the_body(self):
+        """The body names follow-ups and related tickets that are rightly not
+        started; the title names the one this PR implements."""
+        fetch = self._fetch()
+        checks.ticket_not_started("SCRUM-7 x", fetch)
+        assert fetch.seen == ["SCRUM-7"]
+
+    def test_each_title_ticket_once(self):
+        fetch = self._fetch(**{"SCRUM-1": {"status": "To Do", "status_category": "new"},
+                               "SCRUM-2": {"status": "To Do", "status_category": "new"}})
+        out = checks.ticket_not_started("SCRUM-1 / SCRUM-2 / SCRUM-1 x", fetch)
+        assert fetch.seen == ["SCRUM-1", "SCRUM-2"]
+        assert len(out) == 2
+
+    def test_it_can_be_switched_off(self, monkeypatch):
+        monkeypatch.setattr(checks, "REQUIRE_TICKET_STARTED", False)
+        fetch = self._fetch(**{"SCRUM-7": {"status": "To Do", "status_category": "new"}})
+        assert checks.ticket_not_started("SCRUM-7 x", fetch) == []
+
+    def test_run_all_includes_it(self, tmp_path):
+        fetch = self._fetch(**{"SCRUM-7": {"status": "To Do", "status_category": "new"}})
+        out = checks.run_all(str(tmp_path), [], title="SCRUM-7 x", fetch_ticket=fetch)
+        assert any(f["title"].startswith("ticket not moved") for f in out)
+
+
 class TestAgentSessionURL:
     CLAUDE_COMMIT = ("Fix the handler\n\n"
                      "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>")

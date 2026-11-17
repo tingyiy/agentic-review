@@ -19,7 +19,7 @@ import pathlib
 import re
 import subprocess
 
-from .config import TICKET_PATTERN
+from .config import REQUIRE_TICKET_STARTED, TICKET_PATTERN
 
 #: claudelint's default. Past it, Claude Code warns about degraded performance
 #: and may TRUNCATE the file — so rules at the bottom stop being read while
@@ -146,6 +146,53 @@ def ticket_in_title(title):
     }]
 
 
+def ticket_not_started(title, fetch):
+    """The ticket a PR implements should be In Progress, not still To Do.
+
+    The board is how everyone else learns what is being worked on. A PR open
+    against a ticket nobody moved reads, to the reporter, as work that has not
+    begun — and two people can pick the same ticket up, because the board says
+    it is free.
+
+    Keyed on the status CATEGORY (`new`), never a status name: names are
+    per-team, the category is Jira's own. Only the TITLE's tickets — the body
+    mentions related and follow-up tickets that are rightly not started. A
+    ticket already Done is not flagged: a follow-up PR on a closed ticket is
+    routine.
+
+    `fetch` is `tracker.fetch`, injected so this module stays network-free. It
+    never raises and returns None when the tracker is off or the ticket is
+    unreadable — and an unknown status is not a finding: no evidence, no claim.
+
+    `medium` for the same reason as `ticket_in_title`: it withholds approval,
+    and the fix is one click on the board.
+    """
+    if not REQUIRE_TICKET_STARTED or _TICKET_IN_TITLE is None:
+        return []
+    keys = []
+    for k in _TICKET_IN_TITLE.findall(title or ""):
+        if k not in keys:
+            keys.append(k)
+    out = []
+    for key in keys:
+        t = fetch(key)
+        if not t or t.get("status_category") != "new":
+            continue
+        out.append({
+            "severity": "medium",
+            "file": "",
+            "line": 0,
+            "title": f"ticket not moved to In Progress ({key})",
+            "detail": (
+                f"{key} is {t.get('status') or 'not started'!r} on the board, "
+                "but this PR implements it. Move the ticket to In Progress — no "
+                "code change is needed — then re-request this reviewer: a board "
+                "change is not a review trigger, so the finding will not clear "
+                "on its own."),
+        })
+    return out
+
+
 def _example():
     """A concrete id in the message, derived from the configured pattern.
 
@@ -247,7 +294,7 @@ def _deterministic(findings):
 
 
 def run_all(work, changed_paths, title="", commits=(), pr_body="", diff="",
-            lockfiles=None):
+            lockfiles=None, fetch_ticket=None):
     """Every deterministic check, in severity-independent order.
 
     Called AFTER the agent, so the model never sees these and cannot be
@@ -255,6 +302,7 @@ def run_all(work, changed_paths, title="", commits=(), pr_body="", diff="",
     """
     return _deterministic(
         ticket_in_title(title)
+        + (ticket_not_started(title, fetch_ticket) if fetch_ticket else [])
         + agent_session_url(commits, pr_body)
         + route_without_test(work, diff)
         + lockfile_changes(lockfiles)
